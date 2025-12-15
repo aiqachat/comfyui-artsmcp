@@ -171,7 +171,7 @@ class DoubaoSeedanceNode:
                     "default": "1080p"
                 }),
                 "ratio": (["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"], {
-                    "default": "16:9"
+                    "default": "adaptive"
                 }),
                 "duration": ("INT", {
                     "default": 5,
@@ -185,8 +185,8 @@ class DoubaoSeedanceNode:
                 "seed": ("INT", {
                     "default": -1,
                     "min": -1,
-                    "max": 4294967295,
-                    "description": "随机种子，-1表示随机，固定值可复现相同结果"
+                    "max": 2147483647,
+                    "description": "种子整数，用于控制生成内容的随机性。-1表示随机（会使用随机数替代），固定值可生成类似结果"
                 }),
                 "camerafixed": ("BOOLEAN", {
                     "default": False,
@@ -415,24 +415,31 @@ class DoubaoSeedanceNode:
         """
         try:
             # 准备请求数据
-            request_data = {
-                "model": model,
-                "prompt": prompt,
-                "resolution": resolution,
-                "ratio": ratio,
-                "duration": duration,
-                "framespersecond": framespersecond,
-                "watermark": watermark
-                # "return_last_frame": return_last_frame  # 注释：上游中转站暂不支持
-            }
+            # 豆包 Seedance API 需要将参数拼接到 prompt 中
+            # 格式: "prompt内容 --rt ratio --dur duration --rs resolution --fps framespersecond --wm watermark --seed seed --cf camerafixed"
             
-            # 添加可选参数
+            # 构建参数字符串
+            param_parts = []
+            param_parts.append(f"--rt {ratio}")
+            param_parts.append(f"--dur {duration}")
+            param_parts.append(f"--rs {resolution}")
+            param_parts.append(f"--fps {framespersecond}")
+            param_parts.append(f"--wm {str(watermark).lower()}")
+            
             if seed >= 0:
-                request_data["seed"] = seed
+                param_parts.append(f"--seed {seed}")
             
             # 图生视频场景不支持 camerafixed
             if camerafixed and not (image1 or image2):
-                request_data["camerafixed"] = True
+                param_parts.append(f"--cf {str(camerafixed).lower()}")
+            
+            # 组合完整的 prompt
+            full_prompt = f"{prompt} {' '.join(param_parts)}"
+            
+            request_data = {
+                "model": model,
+                "prompt": full_prompt
+            }
             
             # 处理图像输入
             images = []
@@ -471,7 +478,7 @@ class DoubaoSeedanceNode:
             
             print(f"Calling Doubao Seedance API: {host}{path}")
             print(f"Model: {model}")
-            print(f"Prompt: {prompt[:100]}...")
+            print(f"Prompt: {full_prompt[:150]}...")
             
             # Debug 模式：输出请求数据
             if debug_mode:

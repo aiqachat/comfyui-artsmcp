@@ -44,6 +44,20 @@ pip install -r requirements.txt
 **1. 添加节点**
 在 ComfyUI 中添加：`Doubao Seedance Video`
 
+**重要说明**：本节点会自动将用户选择的参数（分辨率、比例、时长等）拼接到 prompt 中发送给 API。
+
+例如，用户输入：
+- `prompt`: "子弹时间效果的运镜画面..."
+- `resolution`: 480p
+- `ratio`: adaptive
+- `duration`: 5
+- `seed`: 3298453148
+
+实际发送的 prompt 为：
+```
+子弹时间效果的运镜画面... --rt adaptive --dur 5 --rs 480p --fps 24 --wm false --seed 3298453148 --cf false
+```
+
 **2. 必需参数**
 - `prompt` (STRING): 视频生成的提示词描述
   - 详细描述场景、动作、镜头、氛围等
@@ -69,9 +83,9 @@ pip install -r requirements.txt
 - `framespersecond` (下拉框): 帧率，仅支持 24
 
 *高级参数：*
-- `seed` (INT): 随机种子
-  - -1 = 随机（默认）
-  - 0 到 4294967295 = 固定种子（可复现）
+- `seed` (INT): 种子整数，用于控制生成内容的随机性
+  - -1 = 随机（会使用随机数替代）
+  - [-1, 2^32-1] 之间的整数 = 固定值可生成类似结果（但不保证完全一致）
 - `camerafixed` (BOOLEAN): 是否固定摄像头（仅文生视频支持）
 - `watermark` (BOOLEAN): 是否添加水印（默认：False）
 
