@@ -186,7 +186,8 @@ class DoubaoSeedanceNode:
                     "default": -1,
                     "min": -1,
                     "max": 2147483647,
-                    "description": "种子整数，用于控制生成内容的随机性。-1表示随机（会使用随机数替代），固定值可生成类似结果"
+                    "description": "种子整数，用于控制生成内容的随机性。-1表示随机（会使用随机数替代），固定值可生成类似结果",
+                    "control_after_generate": False  # 禁用 ComfyUI 自动递增，保持用户设置的值不变
                 }),
                 "camerafixed": ("BOOLEAN", {
                     "default": False,

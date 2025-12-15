@@ -86,6 +86,7 @@ pip install -r requirements.txt
 - `seed` (INT): 种子整数，用于控制生成内容的随机性
   - -1 = 随机（会使用随机数替代）
   - [-1, 2^32-1] 之间的整数 = 固定值可生成类似结果（但不保证完全一致）
+  - ℹ️ **重要**：seed 值不会自动变化，保持用户设置的值不变
 - `camerafixed` (BOOLEAN): 是否固定摄像头（仅文生视频支持）
 - `watermark` (BOOLEAN): 是否添加水印（默认：False）
 
