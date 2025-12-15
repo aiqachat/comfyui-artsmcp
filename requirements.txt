@@ -1,0 +1,52 @@
+# ComfyUI Doubao API Plugin 依赖包
+# 插件支持：Doubao Seedance Video、Doubao Seedream Image
+# 安装方法：pip install -r requirements.txt
+
+# ============================================
+# 核心依赖（必须安装）
+# ============================================
+
+# HTTP 请求库 - 用于 API 调用、图片/视频下载
+requests>=2.31.0
+
+# 图像处理库 - 用于图片格式转换、编码解码
+Pillow>=10.0.0
+
+# 视频处理库 - 用于视频帧提取和处理
+opencv-python>=4.8.0
+
+# PyTorch - ComfyUI 核心依赖，用于 tensor 操作和图像数据处理
+# 注意：如果已经安装了 ComfyUI，通常已包含 torch，无需重复安装
+torch>=2.0.0
+
+# NumPy - 数组操作和图像数据处理
+numpy>=1.24.0
+
+# ============================================
+# 系统要求
+# ============================================
+# Python: 3.8+（推荐 3.10+）
+# ComfyUI: 最新版本
+
+# ============================================
+# 注意事项
+# ============================================
+# 1. 标准库依赖无需安装：
+#    - http.client, json, base64, io, ssl
+#    - urllib.parse, time, os, tempfile
+#
+# 2. ComfyUI 内置模块（无需安装）：
+#    - folder_paths
+#
+# 3. PyTorch 安装：
+#    - CPU 版本：pip install torch --index-url https://download.pytorch.org/whl/cpu
+#    - CUDA 版本：请访问 https://pytorch.org/ 根据系统选择对应版本
+#
+# 4. 如果在 ComfyUI 环境中：
+#    - 建议使用 ComfyUI 已有的 Python 环境
+#    - 通常只需安装 requests 和 Pillow
+#    - 示例：pip install requests Pillow
+#
+# 5. 网络配置：
+#    - 部分 API 需要配置代理或使用国内镜像源
+#    - SSL 验证已禁用（verify=False），适用于内网环境

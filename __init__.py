@@ -1,0 +1,31 @@
+"""
+ComfyUI API Plugin
+支持使用 Doubao API 进行图像和视频生成
+- Doubao Seedance: AI 视频生成
+- Doubao Seedream: AI 图像生成
+"""
+
+# 导入 Doubao Seedance 节点（视频生成）
+from .doubao_seedance_node import (
+    NODE_CLASS_MAPPINGS as NODE_CLASS_MAPPINGS_SEEDANCE, 
+    NODE_DISPLAY_NAME_MAPPINGS as NODE_DISPLAY_NAME_MAPPINGS_SEEDANCE
+)
+
+# 导入 Doubao Seedream 节点（图像生成）
+from .doubao_seedream_node import (
+    NODE_CLASS_MAPPINGS as NODE_CLASS_MAPPINGS_SEEDREAM, 
+    NODE_DISPLAY_NAME_MAPPINGS as NODE_DISPLAY_NAME_MAPPINGS_SEEDREAM
+)
+
+# 合并所有节点映射
+NODE_CLASS_MAPPINGS = {
+    **NODE_CLASS_MAPPINGS_SEEDANCE,
+    **NODE_CLASS_MAPPINGS_SEEDREAM
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    **NODE_DISPLAY_NAME_MAPPINGS_SEEDANCE,
+    **NODE_DISPLAY_NAME_MAPPINGS_SEEDREAM
+}
+
+__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
