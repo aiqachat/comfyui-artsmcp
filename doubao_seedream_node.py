@@ -71,7 +71,7 @@ class DoubaoSeedreamNode:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "generate_image"
-    CATEGORY = "image/AI"
+    CATEGORY = "artsmcp"
     
     def tensor_to_image_url(self, tensor):
         """
@@ -329,6 +329,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DoubaoSeedreamNode": "Doubao Seedream Image"
+    "DoubaoSeedreamNode": "artsmcp-seedream图片"
 }
 

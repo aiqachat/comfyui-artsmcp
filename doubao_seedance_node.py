@@ -146,7 +146,7 @@ class DoubaoSeedanceNode:
                 "prompt": ("STRING", {
                     "multiline": True,
                     "default": "多个镜头。一名侦探进入一间光线昏暗的房间。他检查桌上的线索，手里拿起桌上的某个物品。镜头转向他正在思索。背景音乐低沉神秘。",
-                    "description": "视频生成的提示词描述，详细描述场景、动作、镜头、氛围等。视频参数（分辨率、比例、时长等）请使用下方的独立参数设置"
+                    "description": "视频生成的文本提示词，详细描述场景、动作、镜头、氛围等。仅包含提示词内容，参数通过下方独立字段设置（新版API格式）"
                 }),
                 "api_key": ("STRING", {
                     "default": "sk-your-api-key-here",
@@ -240,7 +240,7 @@ class DoubaoSeedanceNode:
     # RETURN_TYPES = ("VIDEO", "IMAGE")  # 注释：last_frame 功能暂时禁用
     # RETURN_NAMES = ("video", "last_frame")
     FUNCTION = "generate_video"
-    CATEGORY = "video/AI"
+    CATEGORY = "artsmcp"
     OUTPUT_NODE = False
     
     def tensor_to_image_url(self, tensor):
@@ -415,32 +415,25 @@ class DoubaoSeedanceNode:
         生成视频的主函数
         """
         try:
-            # 准备请求数据
-            # 豆包 Seedance API 需要将参数拼接到 prompt 中
-            # 格式: "prompt内容 --rt ratio --dur duration --rs resolution --fps framespersecond --wm watermark --seed seed --cf camerafixed"
-            
-            # 构建参数字符串
-            param_parts = []
-            param_parts.append(f"--rt {ratio}")
-            param_parts.append(f"--dur {duration}")
-            param_parts.append(f"--rs {resolution}")
-            param_parts.append(f"--fps {framespersecond}")
-            param_parts.append(f"--wm {str(watermark).lower()}")
-            
-            if seed >= 0:
-                param_parts.append(f"--seed {seed}")
-            
-            # 图生视频场景不支持 camerafixed
-            if camerafixed and not (image1 or image2):
-                param_parts.append(f"--cf {str(camerafixed).lower()}")
-            
-            # 组合完整的 prompt
-            full_prompt = f"{prompt} {' '.join(param_parts)}"
-            
+            # 准备请求数据 - 新版API格式
+            # 新版API使用独立参数字段，不再拼接到prompt中
             request_data = {
                 "model": model,
-                "prompt": full_prompt
+                "prompt": prompt,  # 纯提示词内容，不包含参数
+                "resolution": resolution,
+                "ratio": ratio,
+                "duration": duration,
+                "fps": framespersecond,
+                "watermark": watermark
             }
+            
+            # seed参数处理：-1表示随机，>= 0表示固定种子
+            if seed >= 0:
+                request_data["seed"] = seed
+            
+            # camerafixed参数：图生视频场景不支持
+            if camerafixed and not (image1 or image2):
+                request_data["camerafixed"] = camerafixed
             
             # 处理图像输入
             images = []
@@ -479,7 +472,8 @@ class DoubaoSeedanceNode:
             
             print(f"Calling Doubao Seedance API: {host}{path}")
             print(f"Model: {model}")
-            print(f"Prompt: {full_prompt[:150]}...")
+            print(f"Prompt: {prompt[:150]}...")
+            print(f"Parameters: resolution={resolution}, ratio={ratio}, duration={duration}s, fps={framespersecond}")
             
             # Debug 模式：输出请求数据
             if debug_mode:
@@ -736,6 +730,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DoubaoSeedanceNode": "Doubao Seedance Video"
+    "DoubaoSeedanceNode": "artsmcp-seedance视频"
 }
 
