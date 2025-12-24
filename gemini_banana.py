@@ -14,12 +14,13 @@ from PIL import Image
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 CATEGORY = "artsmcp"
+CONFIG_SECTION = "Gemini-banana"  # 独立配置节
 CONFIG_PATH = Path(__file__).parent / "config.ini"
 CONFIG = configparser.ConfigParser()
 if CONFIG_PATH.exists():
     CONFIG.read(CONFIG_PATH, encoding="utf-8")
 else:
-    CONFIG["DEFAULT"] = {}
+    CONFIG[CONFIG_SECTION] = {}  # 使用独立配置节
     with CONFIG_PATH.open("w", encoding="utf-8") as fp:
         CONFIG.write(fp)
 
@@ -172,8 +173,8 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
     raise RuntimeError("未知请求失败")
 
 
-class ImageGenerationProNode:
-    """图片生成节点 - 支持文生图、图生图、图生组图、多图融合"""
+class GeminiBananaNode:
+    """Gemini Banana 图片生成节点 - 支持文生图、图生图、多图融合"""
     
     @classmethod
     def INPUT_TYPES(cls):
@@ -186,12 +187,12 @@ class ImageGenerationProNode:
                 }),
                 "api_key": ("STRING", {
                     "multiline": False,
-                    "default": CONFIG["DEFAULT"].get("image_api_key", ""),
+                    "default": CONFIG.get(CONFIG_SECTION, "api_key", fallback=""),
                     "label": "🔑 API密钥"
                 }),
                 "base_url": ("STRING", {
                     "multiline": False,
-                    "default": CONFIG["DEFAULT"].get("image_api_url", "https://apitt.cozex.cn/v1/images/generations"),
+                    "default": CONFIG.get(CONFIG_SECTION, "api_url", fallback="https://apitt.cozex.cn/v1/images/generations"),
                     "label": "🌐 API地址"
                 }),
                 "model": (list(MODEL_MAP.keys()), {
@@ -202,25 +203,10 @@ class ImageGenerationProNode:
                     "default": "2K",
                     "label": "📐 尺寸"
                 }),
-                # "sequential_image_generation": (["disabled", "auto"], {
-                #     "default": "disabled",
-                #     "label": "📸 序列生成"
-                # }),
-                # "max_images": ("INT", {
-                #     "default": 1,
-                #     "min": 1,
-                #     "max": 15,
-                #     "step": 1,
-                #     "label": "🔢 最大图片数"
-                # }),
                 "response_format": (list(RESPONSE_FORMAT_MAP.keys()), {
                     "default": "URL",
                     "label": "📦 响应格式"
                 }),
-                # "watermark": ("BOOLEAN", {
-                #     "default": True,
-                #     "label": "💧 添加水印"
-                # }),
                 "timeout": ("INT", {
                     "default": 120,
                     "min": 30,
@@ -254,17 +240,21 @@ class ImageGenerationProNode:
                        image1=None, image2=None, image3=None, image4=None):
         """主生成函数"""
         
-        # 保存配置
+        # 保存配置到独立配置节
+        if not CONFIG.has_section(CONFIG_SECTION):
+            CONFIG.add_section(CONFIG_SECTION)
+        
         if api_key.strip():
-            CONFIG["DEFAULT"]["image_api_key"] = api_key.strip()
+            CONFIG.set(CONFIG_SECTION, "api_key", api_key.strip())
         if base_url.strip():
-            CONFIG["DEFAULT"]["image_api_url"] = base_url.strip()
+            CONFIG.set(CONFIG_SECTION, "api_url", base_url.strip())
+        
         with CONFIG_PATH.open("w", encoding="utf-8") as fp:
             CONFIG.write(fp)
         
         # 打印输入参数（调试用）
         print("\n" + "="*60)
-        print("[调试] 输入参数:")
+        print("[Gemini-Banana] 输入参数:")
         print(f"  - 提示词: {prompt[:50]}...")
         print(f"  - 模型: {model}")
         print(f"  - 尺寸: {size}")
@@ -287,21 +277,7 @@ class ImageGenerationProNode:
             "prompt": prompt,
             "size": size_value,
             "response_format": response_format_value,
-            # "stream": False,  # Gemini 可能不支持此参数
         }
-        
-        # # 以下参数 Gemini 可能不支持，已注释
-        # # 处理序列生成
-        # if sequential_image_generation == "auto":
-        #     payload["sequential_image_generation"] = "auto"
-        #     payload["sequential_image_generation_options"] = {
-        #         "max_images": max_images
-        #     }
-        # else:
-        #     payload["sequential_image_generation"] = "disabled"
-        # 
-        # # 水印参数
-        # payload["watermark"] = watermark
         
         # 处理输入图片
         if input_images:
@@ -316,7 +292,7 @@ class ImageGenerationProNode:
                 print("[INFO] 模式: 图生图")
             else:
                 payload["image"] = image_urls
-                print(f"[INFO] 模式: 多图融合/图生组图 ({len(image_urls)}张)")
+                print(f"[INFO] 模式: 多图融合 ({len(image_urls)}张)")
         else:
             print("[INFO] 模式: 文生图")
         
@@ -371,9 +347,9 @@ class ImageGenerationProNode:
 
 # ComfyUI 节点映射
 NODE_CLASS_MAPPINGS = {
-    "ImageGenerationProNode": ImageGenerationProNode
+    "GeminiBananaNode": GeminiBananaNode
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ImageGenerationProNode": "artsmcp-banana2"
+    "GeminiBananaNode": "artsmcp-gemini-banana"
 }

@@ -1,6 +1,7 @@
 # ComfyUI 初阳 API Plugin
 
 ComfyUI 插件，集成多种 AI API 进行专业的图像和视频生成：
+- **Gemini Banana**: Google Gemini 3 Pro 图像生成（支持文生图、图生图、多图融合）
 - **初阳-图片生成 Pro**: 支持 Seedream 模型的文生图、图生图、图生组图、多图融合
 - **初阳-视频生成 Pro**: 支持 Doubao Seedance 和即梦模型的文生视频、图生视频（首帧/首尾帧）
 - **Banana Pro**: 高级图像生成节点，支持多 Key 并发
@@ -8,6 +9,17 @@ ComfyUI 插件，集成多种 AI API 进行专业的图像和视频生成：
 - **Doubao Seedream**: AI 图像生成（文生图、图生图、图生组图、多图融合）
 
 ## 功能特性
+
+### 🎨 Gemini Banana（推荐）
+- ✅ **文生图**：根据文本提示生成高质量图片
+- ✅ **图生图**：单图输入生成新图片
+- ✅ **多图融合**：融合多张图片生成新图片（最多4张）
+- ✅ 支持 Gemini 3 Pro Image 模型（1K/2K/4K）
+- ✅ 支持 1K/2K/4K 分辨率
+- ✅ 支持 URL 和 Base64 两种响应格式
+- ✅ 自动重试机制（智能错误处理）
+- ✅ 独立配置管理
+- ✅ 参数自动保存，下次使用更便捷
 
 ### 🎨 初阳-图片生成 Pro
 - ✅ **文生图**：根据文本提示生成图片
@@ -65,6 +77,77 @@ pip install -r requirements.txt
 ```
 
 ## 使用方法
+
+### 🎨 Gemini Banana（推荐）
+
+**请求示例**：
+```json
+{
+  "model": "gemini-3-pro-image-preview-2k",
+  "prompt": "星际穿越，黑洞，电影大片，超现实主义",
+  "size": "2K",
+  "response_format": "url"
+}
+```
+
+**参数说明**：
+
+| 参数 | 类型 | 说明 | 可选值 |
+|------|------|------|--------|
+| `提示词` | STRING | 图片生成的文本描述 | 支持中英文 |
+| `API密钥` | STRING | API 身份验证密钥 | sk-xxx |
+| `API地址` | STRING | API 服务端点 | 默认：https://apitt.cozex.cn/v1/images/generations |
+| `模型` | ENUM | 选择模型 | gemini-3-pro-image-preview / 2k / 4k |
+| `尺寸` | ENUM | 图片分辨率 | 1K / 2K / 4K |
+| `响应格式` | ENUM | 返回格式 | URL / Base64 |
+| `超时(秒)` | INT | API 请求超时时间 | 30-600，默认120 |
+| `最大重试次数` | INT | 失败后重试次数 | 1-10，默认3 |
+| `图片1-4` | IMAGE | 可选输入图片 | 用于图生图/多图融合 |
+
+**功能模式**：
+1. **文生图**：只填提示词，不提供输入图片
+2. **图生图**：提供 1 张输入图片
+3. **多图融合**：提供 2-4 张输入图片
+
+**使用示例**：
+```
+Gemini Banana
+  ├─ 提示词: "星际穿越，黑洞，电影大片"
+  ├─ 模型: gemini-3-pro-image-preview-2k
+  ├─ 尺寸: 2K
+  ├─ 响应格式: URL
+  └─ 图片输出 ──→ SaveImage
+```
+
+**图生图示例**：
+```
+Load Image ──→ 图片1
+                 ↓
+Gemini Banana
+  ├─ 提示词: "将这张图片转换为油画风格"
+  ├─ image1: <connected>
+  └─ 图片输出 ──→ SaveImage
+```
+
+**多图融合示例**：
+```
+Load Image ──→ 图片1
+Load Image ──→ 图片2
+                 ↓
+Gemini Banana
+  ├─ 提示词: "融合这两张图片的风格"
+  ├─ image1: <connected>
+  ├─ image2: <connected>
+  └─ 图片输出 ──→ SaveImage
+```
+
+**重试机制说明**：
+- ✅ **自动重试**：遇到 503/429 等错误自动重试
+- ✅ **指数退避**：2秒、4秒、8秒递增等待
+- ✅ **智能判断**：4xx 客户端错误（除429）直接失败不浪费重试
+- ✅ **详细日志**：显示每次重试的详细信息
+
+---
 
 ### 🎨 初阳-图片生成 Pro
 
