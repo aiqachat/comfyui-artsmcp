@@ -2,6 +2,8 @@ import http.client
 import json
 import base64
 import io
+import socket
+import time
 import torch
 import numpy as np
 from PIL import Image
@@ -72,6 +74,13 @@ class DoubaoSeedreamNode:
     RETURN_NAMES = ("image",)
     FUNCTION = "generate_image"
     CATEGORY = "artsmcp"
+    OUTPUT_NODE = False
+    
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        """强制每次都重新执行(外部API请求)"""
+        import time
+        return time.time()
     
     def tensor_to_image_url(self, tensor):
         """
@@ -123,27 +132,72 @@ class DoubaoSeedreamNode:
             print(f"Error downloading/converting image from URL: {e}")
             return None
     
-    def call_api(self, host, path, payload, headers, timeout):
+    def call_api(self, host, path, payload, headers, timeout, max_retries=3):
         """
-        使用http.client调用API
+        使用http.client调用API,支持指数退避重试机制
         """
-        try:
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            
-            conn = http.client.HTTPSConnection(host, timeout=timeout, context=context)
-            conn.request("POST", path, payload, headers)
-            
-            res = conn.getresponse()
-            data = res.read()
-            conn.close()
-            
-            return res.status, data.decode("utf-8")
-            
-        except Exception as e:
-            print(f"HTTP client error: {e}")
-            return None, str(e)
+        last_error = None
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"[尝试 {attempt}/{max_retries}] 正在调用API...")
+                
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                
+                conn = http.client.HTTPSConnection(host, timeout=timeout, context=context)
+                conn.request("POST", path, payload, headers)
+                
+                res = conn.getresponse()
+                data = res.read()
+                conn.close()
+                
+                # 成功返回
+                if res.status == 200:
+                    print(f"[成功] API调用成功")
+                    return res.status, data.decode("utf-8")
+                
+                # 服务端错误(5xx)可重试
+                elif res.status >= 500:
+                    error_msg = data.decode("utf-8")
+                    print(f"[警告] 服务器错误 {res.status}: {error_msg[:100]}")
+                    last_error = (res.status, error_msg)
+                    
+                    if attempt < max_retries:
+                        wait_time = min(2 ** (attempt - 1), 30)  # 指数退避,最多30秒
+                        print(f"[重试] 等待 {wait_time} 秒后重试...")
+                        time.sleep(wait_time)
+                        continue
+                else:
+                    # 客户端错误(4xx)不重试
+                    return res.status, data.decode("utf-8")
+                    
+            except socket.timeout as e:
+                print(f"[超时] 请求超时: {e}")
+                last_error = (None, f"Timeout: {e}")
+                
+                if attempt < max_retries:
+                    wait_time = min(2 ** (attempt - 1), 30)
+                    print(f"[重试] 等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    continue
+                    
+            except Exception as e:
+                print(f"[错误] HTTP client error: {e}")
+                last_error = (None, str(e))
+                
+                if attempt < max_retries:
+                    wait_time = min(2 ** (attempt - 1), 30)
+                    print(f"[重试] 等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    continue
+        
+        # 所有重试都失败
+        print(f"[失败] API调用失败,已重试 {max_retries} 次")
+        if last_error:
+            return last_error
+        return None, "All retries failed"
     
     def generate_image(self, prompt, api_key, base_url, model, size, image1=None, image2=None,
                       max_images=0, watermark=False, response_format="url", timeout=120):
@@ -316,12 +370,8 @@ class DoubaoSeedreamNode:
             print(f"Error in generate_image: {e}")
             import traceback
             traceback.print_exc()
-            
-            if image1 is not None:
-                return (image1,)
-            else:
-                default_tensor = torch.zeros((1, 512, 512, 3))
-                return (default_tensor,)
+            # 直接抛出异常,不返回默认图片
+            raise e
 
 # ComfyUI节点映射
 NODE_CLASS_MAPPINGS = {

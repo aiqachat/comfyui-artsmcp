@@ -63,9 +63,15 @@ def tensor_to_base64(image_tensor):
 
 def download_image_to_tensor(url: str, timeout: int = 60):
     """从 URL 下载图片并转换为 tensor"""
+    session = None
+    response = None
+    
     try:
         print(f"[INFO] 正在下载图片: {url}")
-        response = requests.get(url, timeout=timeout, verify=False)
+        
+        # 使用独立 Session
+        session = requests.Session()
+        response = session.get(url, timeout=timeout, verify=False)
         response.raise_for_status()
         
         pil_image = Image.open(io.BytesIO(response.content)).convert('RGB')
@@ -75,9 +81,20 @@ def download_image_to_tensor(url: str, timeout: int = 60):
         tensor = torch.from_numpy(numpy_image)
         
         return tensor
+        
     except Exception as e:
         print(f"[ERROR] 下载图片失败: {e}")
         return None
+        
+    finally:
+        # 清理资源
+        try:
+            if response is not None:
+                response.close()
+            if session is not None:
+                session.close()
+        except Exception as e:
+            print(f"[WARN] 清理下载连接失败: {e}")
 
 
 def base64_to_tensor(b64_string: str):
@@ -102,14 +119,19 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
     print(f"[INFO] 请求参数: {json.dumps(payload, ensure_ascii=False)[:200]}...")
     
     last_error = None
+    
     for attempt in range(1, max_retries + 1):
+        # 关键：每次重试都创建新的 Session，避免连接池污染
+        session = requests.Session()
+        response = None
+        
         try:
             if attempt > 1:
                 wait_time = min(backoff ** (attempt - 1), 20)  # 指数退避: 2s, 4s, 8s, 最大20s
                 print(f"[INFO] 第 {attempt} 次重试，等待 {wait_time} 秒...")
                 time.sleep(wait_time)
             
-            response = requests.post(
+            response = session.post(
                 url,
                 headers=headers,
                 json=payload,
@@ -125,6 +147,10 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
             
             result = response.json()
             print(f"[SUCCESS] 请求成功！响应数据: {json.dumps(result, ensure_ascii=False)[:200]}...")
+            
+            # 成功后关闭
+            response.close()
+            session.close()
             return result
             
         except requests.exceptions.HTTPError as exc:
@@ -133,19 +159,26 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
             
             # 打印响应内容用于调试
             try:
-                error_detail = response.json()
-                print(f"[ERROR] 错误详情: {json.dumps(error_detail, ensure_ascii=False)}")
+                if response is not None:
+                    error_detail = response.json()
+                    print(f"[ERROR] 错误详情: {json.dumps(error_detail, ensure_ascii=False)}")
             except:
-                print(f"[ERROR] 响应文本: {response.text[:500]}")
+                if response is not None:
+                    print(f"[ERROR] 响应文本: {response.text[:500]}")
             
             # 4xx 客户端错误直接抛出，不重试（除了 429 限流）
             if 400 <= exc.response.status_code < 500 and exc.response.status_code != 429:
                 print(f"[ERROR] 客户端错误 ({exc.response.status_code})，不进行重试")
+                # 清理资源
+                if response:
+                    response.close()
+                session.close()
                 raise
                 
         except requests.exceptions.Timeout as exc:
             last_error = exc
             print(f"[ERROR] 请求超时 (尝试 {attempt}/{max_retries}): {exc}")
+            print(f"[DEBUG] 超时类型: {type(exc).__name__}")
             
         except requests.exceptions.ConnectionError as exc:
             last_error = exc
@@ -154,6 +187,15 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
         except Exception as exc:
             last_error = exc
             print(f"[ERROR] 未知错误 (尝试 {attempt}/{max_retries}): {exc}")
+        
+        finally:
+            # 关键：无论成功还是失败，都必须清理资源
+            try:
+                if response is not None:
+                    response.close()
+                session.close()
+            except Exception as e:
+                print(f"[WARN] 清理连接失败: {e}")
         
         # 如果还有重试机会，继续循环
         if attempt < max_retries:
@@ -167,6 +209,7 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
     print(f"   2. 确认 API Key 是否有效")
     print(f"   3. 稍后再试，可能是服务器临时过载")
     print(f"   4. 检查网络连接是否稳定")
+    print(f"   5. 尝试增加 timeout 参数值")
     
     if last_error:
         raise last_error
@@ -221,6 +264,13 @@ class GeminiBananaNode:
                     "step": 1,
                     "label": "🔄 最大重试次数"
                 }),
+                "n": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 10,
+                    "step": 1,
+                    "label": "📊 生图数量"
+                }),
             },
             "optional": {
                 "image1": ("IMAGE", {"label": "🖼️ 图片1"}),
@@ -234,9 +284,16 @@ class GeminiBananaNode:
     RETURN_NAMES = ("图片输出",)
     FUNCTION = "generate_image"
     CATEGORY = CATEGORY
+    OUTPUT_NODE = False  # 标明这不是输出节点
+    
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        """强制每次都重新执行,不使用缓存(因为是外部API请求)"""
+        import time
+        return time.time()
     
     def generate_image(self, prompt, api_key, base_url, model, size, 
-                       response_format, timeout, max_retries,
+                       response_format, timeout, max_retries, n,
                        image1=None, image2=None, image3=None, image4=None):
         """主生成函数"""
         
@@ -259,6 +316,7 @@ class GeminiBananaNode:
         print(f"  - 模型: {model}")
         print(f"  - 尺寸: {size}")
         print(f"  - 响应格式: {response_format}")
+        print(f"  - 生图数量: {n}")
         print("="*60 + "\n")
         
         # 收集输入图片
@@ -277,6 +335,7 @@ class GeminiBananaNode:
             "prompt": prompt,
             "size": size_value,
             "response_format": response_format_value,
+            "n": n,  # 添加生图数量参数
         }
         
         # 处理输入图片
@@ -331,10 +390,14 @@ class GeminiBananaNode:
             return (batch_tensor,)
             
         except Exception as e:
+            # 关键:异常时直接抛出,不返回默认图片,避免缓存错误结果
             print(f"[ERROR] 生成失败: {e}")
+            print(f"[DEBUG] 异常类型: {type(e).__name__}")
             import traceback
             traceback.print_exc()
-            return (torch.zeros((1, 512, 512, 3)),)
+                    
+            # 直接抛出异常,让ComfyUI知道节点失败了
+            raise e
     
     def _process_image_item(self, item: dict, format_type: str, timeout: int):
         """处理单个图片数据项"""

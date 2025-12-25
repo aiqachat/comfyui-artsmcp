@@ -2,13 +2,14 @@ import http.client
 import json
 import base64
 import io
+import socket
+import time
 import torch
 import numpy as np
 from PIL import Image
 import requests
 import ssl
 from urllib.parse import urlparse
-import time
 import os
 import tempfile
 import folder_paths
@@ -237,11 +238,15 @@ class DoubaoSeedanceNode:
     # }}
     RETURN_TYPES = ("VIDEO",)
     RETURN_NAMES = ("video",)
-    # RETURN_TYPES = ("VIDEO", "IMAGE")  # 注释：last_frame 功能暂时禁用
-    # RETURN_NAMES = ("video", "last_frame")
     FUNCTION = "generate_video"
     CATEGORY = "artsmcp"
     OUTPUT_NODE = False
+    
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        """强制每次都重新执行(外部API请求)"""
+        import time
+        return time.time()
     
     def tensor_to_image_url(self, tensor):
         """
@@ -280,27 +285,72 @@ class DoubaoSeedanceNode:
             return None
         return image_url
     
-    def call_api(self, host, path, payload, headers, timeout):
+    def call_api(self, host, path, payload, headers, timeout, max_retries=3):
         """
-        使用http.client调用API
+        使用http.client调用API,支持指数退避重试机制
         """
-        try:
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            
-            conn = http.client.HTTPSConnection(host, timeout=timeout, context=context)
-            conn.request("POST", path, payload, headers)
-            
-            res = conn.getresponse()
-            data = res.read()
-            conn.close()
-            
-            return res.status, data.decode("utf-8")
-            
-        except Exception as e:
-            print(f"HTTP client error: {e}")
-            return None, str(e)
+        last_error = None
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"[尝试 {attempt}/{max_retries}] 正在调用API...")
+                
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                
+                conn = http.client.HTTPSConnection(host, timeout=timeout, context=context)
+                conn.request("POST", path, payload, headers)
+                
+                res = conn.getresponse()
+                data = res.read()
+                conn.close()
+                
+                # 成功返回
+                if res.status == 200:
+                    print(f"[成功] API调用成功")
+                    return res.status, data.decode("utf-8")
+                
+                # 服务端错误(5xx)可重试
+                elif res.status >= 500:
+                    error_msg = data.decode("utf-8")
+                    print(f"[警告] 服务器错误 {res.status}: {error_msg[:100]}")
+                    last_error = (res.status, error_msg)
+                    
+                    if attempt < max_retries:
+                        wait_time = min(2 ** (attempt - 1), 30)  # 指数退避,最多30秒
+                        print(f"[重试] 等待 {wait_time} 秒后重试...")
+                        time.sleep(wait_time)
+                        continue
+                else:
+                    # 客户端错误(4xx)不重试
+                    return res.status, data.decode("utf-8")
+                    
+            except socket.timeout as e:
+                print(f"[超时] 请求超时: {e}")
+                last_error = (None, f"Timeout: {e}")
+                
+                if attempt < max_retries:
+                    wait_time = min(2 ** (attempt - 1), 30)
+                    print(f"[重试] 等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    continue
+                    
+            except Exception as e:
+                print(f"[错误] HTTP client error: {e}")
+                last_error = (None, str(e))
+                
+                if attempt < max_retries:
+                    wait_time = min(2 ** (attempt - 1), 30)
+                    print(f"[重试] 等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    continue
+        
+        # 所有重试都失败
+        print(f"[失败] API调用失败,已重试 {max_retries} 次")
+        if last_error:
+            return last_error
+        return None, "All retries failed"
     
     def download_last_frame(self, frame_url):
         """
@@ -372,39 +422,63 @@ class DoubaoSeedanceNode:
             print(f"⚠️ Returning placeholder video due to download failure")
             return self.create_placeholder_video()
     
-    def query_video_status(self, task_id, api_key, base_url, timeout=30):
+    def query_video_status(self, task_id, api_key, base_url, timeout=30, max_retries=3):
         """
-        查询视频生成状态
+        查询视频生成状态,支持重试
         """
-        try:
-            host = base_url if not base_url.startswith('http') else urlparse(base_url).netloc
-            path = f"/v1/video/generations/{task_id}"
-            
-            headers = {
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json'
-            }
-            
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            
-            conn = http.client.HTTPSConnection(host, timeout=timeout, context=context)
-            conn.request("GET", path, headers=headers)
-            
-            res = conn.getresponse()
-            data = res.read()
-            conn.close()
-            
-            if res.status == 200:
-                return json.loads(data.decode("utf-8"))
-            else:
-                print(f"Query failed with status {res.status}: {data.decode('utf-8')}")
-                return None
+        last_error = None
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                host = base_url if not base_url.startswith('http') else urlparse(base_url).netloc
+                path = f"/v1/video/generations/{task_id}"
                 
-        except Exception as e:
-            print(f"Error querying video status: {e}")
-            return None
+                headers = {
+                    'Authorization': f'Bearer {api_key}',
+                    'Content-Type': 'application/json'
+                }
+                
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                
+                conn = http.client.HTTPSConnection(host, timeout=timeout, context=context)
+                conn.request("GET", path, headers=headers)
+                
+                res = conn.getresponse()
+                data = res.read()
+                conn.close()
+                
+                if res.status == 200:
+                    return json.loads(data.decode("utf-8"))
+                else:
+                    error_msg = data.decode('utf-8')
+                    print(f"[警告] 查询失败 (status {res.status}): {error_msg[:100]}")
+                    last_error = error_msg
+                    
+                    if attempt < max_retries:
+                        wait_time = 2
+                        time.sleep(wait_time)
+                        continue
+                    
+            except socket.timeout as e:
+                print(f"[超时] 查询状态超时: {e}")
+                last_error = str(e)
+                
+                if attempt < max_retries:
+                    time.sleep(2)
+                    continue
+                    
+            except Exception as e:
+                print(f"[错误] 查询状态错误: {e}")
+                last_error = str(e)
+                
+                if attempt < max_retries:
+                    time.sleep(2)
+                    continue
+        
+        print(f"[失败] 查询状态失败,已重试 {max_retries} 次")
+        return None
     
     def generate_video(self, prompt, api_key, base_url, model, image1=None, image2=None,
                       resolution="1080p", ratio="16:9", duration=5, framespersecond=24,
@@ -722,7 +796,8 @@ class DoubaoSeedanceNode:
             print(f"Error in generate_video: {e}")
             import traceback
             traceback.print_exc()
-            return (self.create_placeholder_video(),)
+            # 直接抛出异常,不返回占位符视频
+            raise e
 
 # ComfyUI节点映射
 NODE_CLASS_MAPPINGS = {

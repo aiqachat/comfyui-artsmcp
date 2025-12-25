@@ -130,25 +130,79 @@ def download_video_to_path(url: str, output_dir: Path, timeout: int = 300):
         return None
 
 
-def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 300):
-    """发送 API 请求"""
-    try:
-        print(f"[INFO] 发送请求到: {url}")
-        print(f"[INFO] 请求参数: {json.dumps(payload, ensure_ascii=False)[:300]}...")
-        
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=timeout,
-            verify=False
-        )
-        response.raise_for_status()
-        
-        return response.json()
-    except Exception as e:
-        print(f"[ERROR] API 请求失败: {e}")
-        raise
+def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 300, max_retries: int = 3):
+    """发送 API 请求,支持指数退避重试"""
+    last_error = None
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"[尝试 {attempt}/{max_retries}] 发送请求到: {url}")
+            if attempt == 1:
+                print(f"[INFO] 请求参数: {json.dumps(payload, ensure_ascii=False)[:300]}...")
+            
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=timeout,
+                verify=False
+            )
+            
+            # 成功返回
+            if response.status_code == 200:
+                print(f"[成功] API调用成功")
+                return response.json()
+            
+            # 服务端错误(5xx)可重试
+            elif response.status_code >= 500:
+                error_msg = response.text
+                print(f"[警告] 服务器错误 {response.status_code}: {error_msg[:100]}")
+                last_error = Exception(f"Server error {response.status_code}: {error_msg}")
+                
+                if attempt < max_retries:
+                    wait_time = min(2 ** (attempt - 1), 30)  # 指数退避,最多30秒
+                    print(f"[重试] 等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    continue
+            else:
+                # 客户端错误(4xx)直接报错
+                response.raise_for_status()
+                
+        except requests.exceptions.Timeout as e:
+            print(f"[超时] 请求超时: {e}")
+            last_error = e
+            
+            if attempt < max_retries:
+                wait_time = min(2 ** (attempt - 1), 30)
+                print(f"[重试] 等待 {wait_time} 秒后重试...")
+                time.sleep(wait_time)
+                continue
+                
+        except requests.exceptions.ConnectionError as e:
+            print(f"[连接错误] 连接失败: {e}")
+            last_error = e
+            
+            if attempt < max_retries:
+                wait_time = min(2 ** (attempt - 1), 30)
+                print(f"[重试] 等待 {wait_time} 秒后重试...")
+                time.sleep(wait_time)
+                continue
+                
+        except Exception as e:
+            print(f"[错误] API请求失败: {e}")
+            last_error = e
+            
+            if attempt < max_retries:
+                wait_time = min(2 ** (attempt - 1), 30)
+                print(f"[重试] 等待 {wait_time} 秒后重试...")
+                time.sleep(wait_time)
+                continue
+    
+    # 所有重试都失败
+    print(f"[失败] API调用失败,已重试 {max_retries} 次")
+    if last_error:
+        raise last_error
+    raise RuntimeError("All retries failed")
 
 
 def poll_task_status(task_id: str, api_key: str, base_url: str, max_retries: int = 60, delay: int = 5):
@@ -167,35 +221,54 @@ def poll_task_status(task_id: str, api_key: str, base_url: str, max_retries: int
     print(f"[INFO] 开始轮询任务状态: {task_id}")
     
     for attempt in range(max_retries):
-        try:
-            response = requests.get(status_url, headers=headers, verify=False, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            
-            # 提取状态
-            status = None
-            if "data" in result and isinstance(result["data"], dict):
-                status = result["data"].get("status")
-            elif "status" in result:
-                status = result["status"]
-            
-            print(f"[INFO] 任务状态 ({attempt + 1}/{max_retries}): {status}")
-            
-            if status and str(status).upper() == "SUCCESS":
-                print("[SUCCESS] 任务完成!")
-                return result
-            elif status and str(status).upper() == "FAILURE":
-                print("[ERROR] 任务失败!")
-                return result
-            
-            # 等待后重试
-            if attempt < max_retries - 1:
-                time.sleep(delay)
+        query_retries = 3  # 每次查询重试次数
+        query_success = False
+        
+        for retry in range(query_retries):
+            try:
+                response = requests.get(status_url, headers=headers, verify=False, timeout=30)
+                response.raise_for_status()
+                result = response.json()
+                query_success = True
+                break
                 
-        except Exception as e:
-            print(f"[WARN] 查询状态失败 ({attempt + 1}/{max_retries}): {e}")
+            except requests.exceptions.Timeout as e:
+                print(f"[超时] 查询状态超时 (retry {retry + 1}/{query_retries}): {e}")
+                if retry < query_retries - 1:
+                    time.sleep(2)
+                    continue
+                    
+            except Exception as e:
+                print(f"[错误] 查询状态失败 (retry {retry + 1}/{query_retries}): {e}")
+                if retry < query_retries - 1:
+                    time.sleep(2)
+                    continue
+        
+        if not query_success:
+            print(f"[WARN] 查询状态失败，将在 {delay} 秒后重试...")
             if attempt < max_retries - 1:
                 time.sleep(delay)
+            continue
+        
+        # 提取状态
+        status = None
+        if "data" in result and isinstance(result["data"], dict):
+            status = result["data"].get("status")
+        elif "status" in result:
+            status = result["status"]
+        
+        print(f"[INFO] 任务状态 ({attempt + 1}/{max_retries}): {status}")
+        
+        if status and str(status).upper() == "SUCCESS":
+            print("[SUCCESS] 任务完成!")
+            return result
+        elif status and str(status).upper() == "FAILURE":
+            print("[ERROR] 任务失败!")
+            return result
+        
+        # 等待后重试
+        if attempt < max_retries - 1:
+            time.sleep(delay)
     
     print("[WARN] 达到最大重试次数")
     return None
@@ -311,6 +384,12 @@ class VideoGenerationProNode:
     FUNCTION = "generate_video"
     CATEGORY = CATEGORY
     OUTPUT_NODE = True
+    
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        """强制每次都重新执行(外部API请求)"""
+        import time
+        return time.time()
     
     def generate_video(self, prompt, api_key, base_url, model_type, doubao_model, jimeng_model,
                        resolution, ratio, duration, fps, watermark, camerafixed, seed,
@@ -460,7 +539,8 @@ class VideoGenerationProNode:
             print(f"[ERROR] 生成失败: {e}")
             import traceback
             traceback.print_exc()
-            return ("",)
+            # 直接抛出异常,不返回空字符串
+            raise e
 
 
 # ComfyUI 节点映射
