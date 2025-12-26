@@ -1,9 +1,21 @@
 ComfyUI 插件，集成多种 AI API 进行专业的图像和视频生成：
+- **Nano Banana**: Google Nano Banana 图像生成（支持文生图、图生图）
 - **Gemini Banana**: Google Gemini 3 Pro 图像生成（支持文生图、图生图、多图融合）
 - **Doubao Seedance**: AI 视频生成（文生视频、图生视频）
 - **Doubao Seedream**: AI 图像生成（文生图、图生图、图生组图、多图融合）
 
 ## 功能特性
+
+### 🍌 Nano Banana（推荐）
+- ✅ **文生图**：根据文本提示生成高质量图片
+- ✅ **多图参考**：支持 1-4 张图片参考生成
+- ✅ 支持 Nano Banana / Nano Banana 2 / Nano Banana Pro 模型
+- ✅ 支持 10 种宽高比（1:1, 4:3, 3:4, 16:9, 9:16, 2:3, 3:2, 4:5, 5:4, 21:9）
+- ✅ nano-banana-2 支持 1K/2K/4K 分辨率
+- ✅ 支持 URL 和 Base64 两种响应格式
+- ✅ 自动重试机制（智能错误处理）
+- ✅ 独立配置管理
+- ✅ 参数自动保存，下次使用更便捷
 
 ### 🎨 Gemini Banana（推荐）
 - ✅ **文生图**：根据文本提示生成高质量图片
@@ -42,6 +54,70 @@ pip install -r requirements.txt
 ```
 
 ## 使用方法
+
+### 🍌 Nano Banana（推荐）
+
+**请求示例**：
+```json
+{
+  "model": "nano-banana-pro",
+  "prompt": "一只可爱的猫咪，卡通风格，高清",
+  "aspect_ratio": "1:1",
+  "n": 1,
+  "response_format": "url"
+}
+```
+
+**参数说明**：
+
+| 参数 | 类型 | 说明 | 可选值 |
+|------|------|------|--------|
+| `提示词` | STRING | 图片生成的文本描述 | 支持中英文 |
+| `API密钥` | STRING | API 身份验证密钥 | sk-xxx |
+| `API地址` | STRING | API 服务端点 | 默认：https://api.openai.com/v1/images/generations |
+| `模型` | ENUM | 选择模型 | nano-banana / nano-banana-2 / nano-banana-pro |
+| `宽高比` | ENUM | 图片宽高比 | 1:1 / 4:3 / 3:4 / 16:9 / 9:16 / 2:3 / 3:2 / 4:5 / 5:4 / 21:9 |
+| `图像尺寸` | ENUM | 图像分辨率(仅nano-banana-2) | none / 1K / 2K / 4K |
+| `响应格式` | ENUM | 返回格式 | URL / Base64 |
+| `超时(秒)` | INT | API 请求超时时间 | 30-600，默认120 |
+| `最大重试次数` | INT | 失败后重试次数 | 1-10，默认3 |
+| `生图数量` | INT | 一次生成图片数量 | 1-10，默认1 |
+| `参考图片1-4` | IMAGE | 可选参考图片 | 用于多图参考 |
+
+**功能模式**：
+1. **文生图**：只填提示词，不提供参考图片
+2. **多图参考**：提供 1-4 张参考图片
+
+**使用示例**：
+```
+Nano Banana
+  ├─ 提示词: "一只可爱的猫咪，卡通风格"
+  ├─ 模型: nano-banana-pro
+  ├─ 宽高比: 16:9
+  ├─ 生图数量: 2
+  ├─ 响应格式: URL
+  └─ 图片输出 ──→ SaveImage
+```
+
+**多图参考示例**：
+```
+Load Image ──→ 参考图片1
+Load Image ──→ 参考图片2
+                 ↓
+Nano Banana
+  ├─ 提示词: "融合这两张图片的风格"
+  ├─ image1: <connected>
+  ├─ image2: <connected>
+  └─ 图片输出 ──→ SaveImage
+```
+
+**重试机制说明**：
+- ✅ **自动重试**：遇到 503/429 等错误自动重试
+- ✅ **指数退避**：2秒、4秒、8秒递增等待
+- ✅ **智能判断**：4xx 客户端错误（除429）直接失败不浪费重试
+- ✅ **详细日志**：显示每次重试的详细信息
+
+---
 
 ### 🎨 Gemini Banana（推荐）
 

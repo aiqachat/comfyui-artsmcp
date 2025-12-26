@@ -10,6 +10,19 @@ from PIL import Image
 import requests
 import ssl
 from urllib.parse import urlparse
+import configparser
+from pathlib import Path
+
+# 加载配置文件
+CONFIG_PATH = Path(__file__).parent / "config.ini"
+CONFIG = configparser.ConfigParser()
+if CONFIG_PATH.exists():
+    CONFIG.read(CONFIG_PATH, encoding="utf-8")
+else:
+    CONFIG["DEFAULT"] = {}
+    CONFIG["Seedream"] = {}
+    with CONFIG_PATH.open("w", encoding="utf-8") as fp:
+        CONFIG.write(fp)
 
 class DoubaoSeedreamNode:
     """
@@ -31,8 +44,8 @@ class DoubaoSeedreamNode:
                     "description": "API密钥，用于身份验证"
                 }),
                 "base_url": ("STRING", {
-                    "default": "api.cozex.cn",
-                    "description": "API服务地址，例如：api.cozex.cn"
+                    "default": CONFIG.get("Seedream", "api_url", fallback="https://api.openai.com"),
+                    "description": "API服务地址，例如：api.openai.com"
                 }),
                 "model": (["doubao-seedream-4-0-250828", "doubao-seedream-4-5-251128"], {
                     "default": "doubao-seedream-4-0-250828"

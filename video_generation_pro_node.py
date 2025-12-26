@@ -293,7 +293,7 @@ class VideoGenerationProNode:
                 }),
                 "base_url": ("STRING", {
                     "multiline": False,
-                    "default": CONFIG["DEFAULT"].get("video_api_url", "https://apitt.cozex.cn/v1/video/generations"),
+                    "default": CONFIG["DEFAULT"].get("video_api_url", "https://api.openai.com/v1/video/generations"),
                     "label": "🌐 API地址"
                 }),
                 "model_type": (["Doubao", "即梦"], {

@@ -1,6 +1,8 @@
 """
 ComfyUI API Plugin
-支持使用 Doubao API 进行图像和视频生成
+支持使用多种 AI API 进行图像和视频生成
+- Nano Banana: Google Nano Banana 图像生成
+- Gemini Banana: Google Gemini 3 Pro 图像生成
 - Doubao Seedance: AI 视频生成
 - Doubao Seedream: AI 图像生成
 """
@@ -15,6 +17,12 @@ from .doubao_seedance_node import (
 from .doubao_seedream_node import (
     NODE_CLASS_MAPPINGS as NODE_CLASS_MAPPINGS_SEEDREAM, 
     NODE_DISPLAY_NAME_MAPPINGS as NODE_DISPLAY_NAME_MAPPINGS_SEEDREAM
+)
+
+# 导入 Nano Banana 图片生成节点
+from .nano_banana_node import (
+    NODE_CLASS_MAPPINGS as NODE_CLASS_MAPPINGS_NANO_BANANA,
+    NODE_DISPLAY_NAME_MAPPINGS as NODE_DISPLAY_NAME_MAPPINGS_NANO_BANANA
 )
 
 # 导入 Gemini Banana 图片生成节点
@@ -33,6 +41,7 @@ from .gemini_banana import (
 NODE_CLASS_MAPPINGS = {
     **NODE_CLASS_MAPPINGS_SEEDANCE,
     **NODE_CLASS_MAPPINGS_SEEDREAM,
+    **NODE_CLASS_MAPPINGS_NANO_BANANA,
     **NODE_CLASS_MAPPINGS_GEMINI_BANANA,
     # **NODE_CLASS_MAPPINGS_VIDEO_PRO
 }
@@ -40,6 +49,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     **NODE_DISPLAY_NAME_MAPPINGS_SEEDANCE,
     **NODE_DISPLAY_NAME_MAPPINGS_SEEDREAM,
+    **NODE_DISPLAY_NAME_MAPPINGS_NANO_BANANA,
     **NODE_DISPLAY_NAME_MAPPINGS_GEMINI_BANANA,
     # **NODE_DISPLAY_NAME_MAPPINGS_VIDEO_PRO
 }

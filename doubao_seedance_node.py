@@ -14,6 +14,20 @@ import os
 import tempfile
 import folder_paths
 import cv2
+import configparser
+from pathlib import Path
+
+# 加载配置文件
+CATEGORY = "artsmcp"
+CONFIG_SECTION = "Seedance"  # 独立配置节
+CONFIG_PATH = Path(__file__).parent / "config.ini"
+CONFIG = configparser.ConfigParser()
+if CONFIG_PATH.exists():
+    CONFIG.read(CONFIG_PATH, encoding="utf-8")
+else:
+    CONFIG[CONFIG_SECTION] = {}  # 使用独立配置节
+    with CONFIG_PATH.open("w", encoding="utf-8") as fp:
+        CONFIG.write(fp)
 
 # ComfyUI 中断检测
 try:
@@ -150,15 +164,17 @@ class DoubaoSeedanceNode:
                     "description": "视频生成的文本提示词，详细描述场景、动作、镜头、氛围等。仅包含提示词内容，参数通过下方独立字段设置（新版API格式）"
                 }),
                 "api_key": ("STRING", {
-                    "default": "sk-your-api-key-here",
-                    "description": "API密钥，用于身份验证"
+                    "default": CONFIG.get(CONFIG_SECTION, "api_key", fallback="sk-your-api-key-here"),
+                    "description": "API密钥，用于身份验证",
+                    "label": "🔑 API密钥"
                 }),
                 "base_url": ("STRING", {
-                    "default": "api.cozex.cn",
-                    "description": "API服务地址，例如：api.cozex.cn"
+                    "default": CONFIG.get(CONFIG_SECTION, "api_url", fallback="https://api.openai.com"),
+                    "description": "API服务地址，例如：api.openai.com",
+                    "label": "🌐 API地址"
                 }),
-                "model": (["doubao-seedance-1-0-pro-fast-251015", "doubao-seedance-1-0-pro-250528"], {
-                    "default": "doubao-seedance-1-0-pro-fast-251015"
+                "model": (["doubao-seedance-1-5-pro-251215", "doubao-seedance-1-0-pro-fast-251015", "doubao-seedance-1-0-pro-250528"], {
+                    "default": "doubao-seedance-1-5-pro-251215"
                 }),
             },
             "optional": {
@@ -197,6 +213,10 @@ class DoubaoSeedanceNode:
                 "watermark": ("BOOLEAN", {
                     "default": False,
                     "description": "生成视频是否包含水印"
+                }),
+                "generate_audio": ("BOOLEAN", {
+                    "default": True,
+                    "description": "是否生成包含画面同步音频的视频（仅 Seedance 1.5 pro 支持）"
                 }),
                 # "return_last_frame": ("BOOLEAN", {
                 #     "default": False,
@@ -237,9 +257,9 @@ class DoubaoSeedanceNode:
     #   Quality_Check: "下载视频并返回VideoObject，完全兼容VHS等视频扩展"
     # }}
     RETURN_TYPES = ("VIDEO",)
-    RETURN_NAMES = ("video",)
+    RETURN_NAMES = ("视频输出",)
     FUNCTION = "generate_video"
-    CATEGORY = "artsmcp"
+    CATEGORY = CATEGORY
     OUTPUT_NODE = False
     
     @classmethod
@@ -293,7 +313,10 @@ class DoubaoSeedanceNode:
         
         for attempt in range(1, max_retries + 1):
             try:
-                print(f"[尝试 {attempt}/{max_retries}] 正在调用API...")
+                if attempt > 1:
+                    print(f"[INFO] 第 {attempt} 次重试...")
+                else:
+                    print(f"[INFO] 正在调用API...")
                 
                 context = ssl.create_default_context()
                 context.check_hostname = False
@@ -308,7 +331,7 @@ class DoubaoSeedanceNode:
                 
                 # 成功返回
                 if res.status == 200:
-                    print(f"[成功] API调用成功")
+                    print(f"[SUCCESS] API调用成功")
                     return res.status, data.decode("utf-8")
                 
                 # 服务端错误(5xx)可重试
@@ -482,13 +505,42 @@ class DoubaoSeedanceNode:
     
     def generate_video(self, prompt, api_key, base_url, model, image1=None, image2=None,
                       resolution="1080p", ratio="16:9", duration=5, framespersecond=24,
-                      seed=-1, camerafixed=False, watermark=False, 
+                      seed=-1, camerafixed=False, watermark=False, generate_audio=True,
                       # return_last_frame=False,  # 注释：上游中转站暂不支持
                       debug_mode=False, timeout=60, poll_interval=10, max_poll_time=300):
         """
         生成视频的主函数
         """
         try:
+            # 保存配置到独立配置节
+            if not CONFIG.has_section(CONFIG_SECTION):
+                CONFIG.add_section(CONFIG_SECTION)
+            
+            if api_key.strip():
+                CONFIG.set(CONFIG_SECTION, "api_key", api_key.strip())
+            if base_url.strip():
+                CONFIG.set(CONFIG_SECTION, "api_url", base_url.strip())
+            
+            with CONFIG_PATH.open("w", encoding="utf-8") as fp:
+                CONFIG.write(fp)
+            
+            # 打印输入参数（调试用）
+            print("\n" + "="*60)
+            print("[Doubao-Seedance] 输入参数:")
+            print(f"  - 提示词: {prompt[:50]}...")
+            print(f"  - 模型: {model}")
+            print(f"  - 分辨率: {resolution}")
+            print(f"  - 宽高比: {ratio}")
+            print(f"  - 时长: {duration}秒")
+            print(f"  - 帧率: {framespersecond}fps")
+            print(f"  - 种子: {seed if seed >= 0 else '随机'}")
+            print(f"  - 生成音频: {generate_audio}")
+            print(f"  - 水印: {watermark}")
+            if image1 is not None or image2 is not None:
+                img_count = (1 if image1 is not None else 0) + (1 if image2 is not None else 0)
+                print(f"  - 参考图片: {img_count}张")
+            print("="*60 + "\n")
+            
             # 准备请求数据 - 新版API格式
             # 新版API使用独立参数字段，不再拼接到prompt中
             request_data = {
@@ -498,7 +550,8 @@ class DoubaoSeedanceNode:
                 "ratio": ratio,
                 "duration": duration,
                 "fps": framespersecond,
-                "watermark": watermark
+                "watermark": watermark,
+                "generate_audio": generate_audio
             }
             
             # seed参数处理：-1表示随机，>= 0表示固定种子
@@ -544,10 +597,8 @@ class DoubaoSeedanceNode:
                 host = base_url
                 path = "/v1/video/generations"
             
-            print(f"Calling Doubao Seedance API: {host}{path}")
-            print(f"Model: {model}")
-            print(f"Prompt: {prompt[:150]}...")
-            print(f"Parameters: resolution={resolution}, ratio={ratio}, duration={duration}s, fps={framespersecond}")
+            print(f"[INFO] 调用 Doubao Seedance API: {host}{path}")
+            print(f"[INFO] 模型: {model}")
             
             # Debug 模式：输出请求数据
             if debug_mode:
@@ -568,9 +619,9 @@ class DoubaoSeedanceNode:
                     task_id = result.get('id') or result.get('task_id')
                     
                     if task_id:
-                        print(f"Video generation task created: {task_id}")
-                        print("Polling for video status...")
-                        print("Press Ctrl+C or click Stop in ComfyUI to cancel")
+                        print(f"[INFO] 视频生成任务已创建: {task_id}")
+                        print(f"[INFO] 正在轮询视频生成状态...")
+                        print(f"[INFO] 按 Ctrl+C 或点击 ComfyUI 的停止按钮可取消")
                         
                         # 轮询查询视频状态
                         start_time = time.time()
@@ -776,11 +827,15 @@ class DoubaoSeedanceNode:
                             return (self.create_placeholder_video(),)
                         
                         # 超时
-                        print(f"Polling timeout after {max_poll_time} seconds")
+                        print(f"[ERROR] 轮询超时，已等待 {max_poll_time} 秒")
+                        print(f"\n💡 可能的解决方案:")
+                        print(f"   1. 增加 max_poll_time 参数值")
+                        print(f"   2. 检查视频生成任务是否正常")
+                        print(f"   3. 稍后使用任务ID查询: {task_id}")
                         return (self.create_placeholder_video(),)
                     else:
-                        print("No task_id in response")
-                        print("Response:", response_text)
+                        print("[ERROR] 响应中未找到 task_id")
+                        print(f"[ERROR] 响应内容: {response_text[:300]}...")
                         return (self.create_placeholder_video(),)
                         
                 except json.JSONDecodeError as e:
@@ -788,15 +843,23 @@ class DoubaoSeedanceNode:
                     print("Raw response:", response_text[:500])
                     return (self.create_placeholder_video(),)
             else:
-                print(f"API call failed with status code: {status_code}")
-                print(f"Error response: {response_text}")
+                print(f"[ERROR] API调用失败，状态码: {status_code}")
+                print(f"[ERROR] 错误响应: {response_text[:500]}")
+                print(f"\n💡 可能的解决方案:")
+                print(f"   1. 检查 API Key 是否有效")
+                print(f"   2. 确认 API 服务地址是否正确")
+                print(f"   3. 查看错误信息，调整参数")
+                print(f"   4. 检查网络连接是否正常")
                 return (self.create_placeholder_video(),)
             
         except Exception as e:
-            print(f"Error in generate_video: {e}")
+            # 关键:异常时直接抛出,不返回占位符视频,避免缓存错误结果
+            print(f"[ERROR] 生成失败: {e}")
+            print(f"[DEBUG] 异常类型: {type(e).__name__}")
             import traceback
             traceback.print_exc()
-            # 直接抛出异常,不返回占位符视频
+            
+            # 直接抛出异常,让ComfyUI知道节点失败了
             raise e
 
 # ComfyUI节点映射

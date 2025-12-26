@@ -14,7 +14,7 @@ from PIL import Image
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 CATEGORY = "artsmcp"
-CONFIG_SECTION = "Gemini-banana"  # 独立配置节
+CONFIG_SECTION = "Nano-banana"  # 独立配置节
 CONFIG_PATH = Path(__file__).parent / "config.ini"
 CONFIG = configparser.ConfigParser()
 if CONFIG_PATH.exists():
@@ -24,7 +24,21 @@ else:
     with CONFIG_PATH.open("w", encoding="utf-8") as fp:
         CONFIG.write(fp)
 
-# 图像尺寸映射（Gemini 支持 1K, 2K, 4K）
+# 宽高比映射
+ASPECT_RATIO_MAP = {
+    "1:1": "1:1",
+    "4:3": "4:3",
+    "3:4": "3:4",
+    "16:9": "16:9",
+    "9:16": "9:16",
+    "2:3": "2:3",
+    "3:2": "3:2",
+    "4:5": "4:5",
+    "5:4": "5:4",
+    "21:9": "21:9",
+}
+
+# 图像尺寸映射(仅nano-banana-2支持)
 IMAGE_SIZE_MAP = {
     "1K": "1K",
     "2K": "2K",
@@ -33,9 +47,8 @@ IMAGE_SIZE_MAP = {
 
 # 模型映射
 MODEL_MAP = {
-    "gemini-3-pro-image-preview": "gemini-3-pro-image-preview",
-    "gemini-3-pro-image-preview-2k": "gemini-3-pro-image-preview-2k",
-    "gemini-3-pro-image-preview-4k": "gemini-3-pro-image-preview-4k",
+    "nano-banana": "nano-banana",
+    "nano-banana-2": "nano-banana-2",
 }
 
 # 响应格式映射
@@ -216,8 +229,8 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
     raise RuntimeError("未知请求失败")
 
 
-class GeminiBananaNode:
-    """Gemini Banana 图片生成节点 - 支持文生图、图生图、多图融合"""
+class NanoBananaNode:
+    """Nano Banana 图片生成节点 - 支持文生图、图生图"""
     
     @classmethod
     def INPUT_TYPES(cls):
@@ -225,7 +238,7 @@ class GeminiBananaNode:
             "required": {
                 "prompt": ("STRING", {
                     "multiline": True,
-                    "default": "星际穿越，黑洞，电影大片，超现实主义",
+                    "default": "一只可爱的猫咪,卡通风格,高清",
                     "label": "💬 提示词"
                 }),
                 "api_key": ("STRING", {
@@ -242,9 +255,9 @@ class GeminiBananaNode:
                     "default": list(MODEL_MAP.keys())[0],
                     "label": "🧠 模型"
                 }),
-                "size": (list(IMAGE_SIZE_MAP.keys()), {
-                    "default": "2K",
-                    "label": "📐 尺寸"
+                "aspect_ratio": (list(ASPECT_RATIO_MAP.keys()), {
+                    "default": "1:1",
+                    "label": "📐 宽高比"
                 }),
                 "response_format": (list(RESPONSE_FORMAT_MAP.keys()), {
                     "default": "URL",
@@ -273,10 +286,14 @@ class GeminiBananaNode:
                 }),
             },
             "optional": {
-                "image1": ("IMAGE", {"label": "🖼️ 图片1"}),
-                "image2": ("IMAGE", {"label": "🖼️ 图片2"}),
-                "image3": ("IMAGE", {"label": "🖼️ 图片3"}),
-                "image4": ("IMAGE", {"label": "🖼️ 图片4"}),
+                "image_size": (list(IMAGE_SIZE_MAP.keys()) + ["none"], {
+                    "default": "none",
+                    "label": "📏 图像尺寸(仅nano-banana-2)"
+                }),
+                "image1": ("IMAGE", {"label": "🖼️ 参考图片1"}),
+                "image2": ("IMAGE", {"label": "🖼️ 参考图片2"}),
+                "image3": ("IMAGE", {"label": "🖼️ 参考图片3"}),
+                "image4": ("IMAGE", {"label": "🖼️ 参考图片4"}),
             }
         }
     
@@ -292,8 +309,9 @@ class GeminiBananaNode:
         import time
         return time.time()
     
-    def generate_image(self, prompt, api_key, base_url, model, size, 
+    def generate_image(self, prompt, api_key, base_url, model, aspect_ratio, 
                        response_format, timeout, max_retries, n,
+                       image_size="none",
                        image1=None, image2=None, image3=None, image4=None):
         """主生成函数"""
         
@@ -311,55 +329,79 @@ class GeminiBananaNode:
         
         # 打印输入参数（调试用）
         print("\n" + "="*60)
-        print("[Gemini-Banana] 输入参数:")
+        print("[Nano-Banana] 输入参数:")
         print(f"  - 提示词: {prompt[:50]}...")
         print(f"  - 模型: {model}")
-        print(f"  - 尺寸: {size}")
+        print(f"  - 宽高比: {aspect_ratio}")
+        print(f"  - 图像尺寸: {image_size}")
         print(f"  - 响应格式: {response_format}")
         print(f"  - 生图数量: {n}")
         print("="*60 + "\n")
         
         # 收集输入图片
         input_images = []
-        for img in [image1, image2, image3, image4]:
+        for idx, img in enumerate([image1, image2, image3, image4], 1):
             if img is not None:
                 input_images.append(img)
+                print(f"[DEBUG] 检测到参考图片{idx}, 形状: {img.shape}")
         
-        # 构建请求参数（仅包含 Gemini 支持的参数）
+        print(f"[DEBUG] 共收集到 {len(input_images)} 张参考图片")
+        
+        # 构建请求参数
         model_value = MODEL_MAP[model]
-        size_value = IMAGE_SIZE_MAP[size]
+        aspect_ratio_value = ASPECT_RATIO_MAP[aspect_ratio]
         response_format_value = RESPONSE_FORMAT_MAP[response_format]
         
+        # 基本参数
         payload = {
             "model": model_value,
             "prompt": prompt,
-            "size": size_value,
             "response_format": response_format_value,
-            "n": n,  # 添加生图数量参数
         }
         
-        # 处理输入图片
+        # 文生图模式才添加 aspect_ratio 和 n
+        # 图生图模式下这些参数可能无效
+        if not input_images:
+            payload["aspect_ratio"] = aspect_ratio_value
+            payload["n"] = n
+            print(f"[DEBUG] 文生图模式，添加 aspect_ratio 和 n 参数")
+        else:
+            print(f"[DEBUG] 图生图模式，不添加 aspect_ratio 和 n 参数")
+        
+        # 添加图像尺寸参数(仅nano-banana-2支持)
+        if image_size != "none" and model == "nano-banana-2":
+            payload["image_size"] = IMAGE_SIZE_MAP[image_size]
+            print(f"[INFO] 添加图像尺寸参数: {image_size}")
+        
+        # 处理输入图片(支持多图)
         if input_images:
             image_urls = []
             for idx, img_tensor in enumerate(input_images):
                 base64_url = tensor_to_base64(img_tensor)
                 image_urls.append(base64_url)
-                print(f"[INFO] 已转换图片{idx + 1}为 Base64")
+                # 打印Base64前100个字符用于验证
+                print(f"[INFO] 已转换图片{idx + 1}为 Base64: {base64_url[:100]}...")
             
-            if len(image_urls) == 1:
-                payload["image"] = image_urls[0]
-                print("[INFO] 模式: 图生图")
-            else:
-                payload["image"] = image_urls
-                print(f"[INFO] 模式: 多图融合 ({len(image_urls)}张)")
+            payload["image"] = image_urls
+            print(f"[INFO] 模式: 多图参考 ({len(image_urls)}张)")
+            print(f"[DEBUG] payload 中包含 'image' 字段: {('image' in payload)}")
         else:
             print("[INFO] 模式: 文生图")
+            print("[DEBUG] payload 中不包含 'image' 字段")
         
         # 发送请求
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
+        
+        # 打印完整的payload用于调试
+        print(f"[DEBUG] 完整 payload:")
+        for key, value in payload.items():
+            if key == "image":
+                print(f"  - {key}: [{len(value)} 张图片，每张约 {len(str(value[0]))} 字符]")
+            else:
+                print(f"  - {key}: {value}")
         
         try:
             result = make_api_request(base_url, headers, payload, timeout, max_retries)
@@ -410,9 +452,9 @@ class GeminiBananaNode:
 
 # ComfyUI 节点映射
 NODE_CLASS_MAPPINGS = {
-    "GeminiBananaNode": GeminiBananaNode
+    "NanoBananaNode": NanoBananaNode
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "GeminiBananaNode": "artsmcp-gemini-banana"
+    "NanoBananaNode": "artsmcp-nano-banana"
 }
