@@ -47,8 +47,8 @@ IMAGE_SIZE_MAP = {
 
 # 模型映射
 MODEL_MAP = {
-    "nano-banana": "nano-banana",
-    "nano-banana-2": "nano-banana-2",
+    "nano-banana": "gemini-2.5-flash-image-preview",
+    "nano-banana-2": "gemini-3-pro-image-preview",
 }
 
 # 响应格式映射
@@ -243,12 +243,12 @@ class NanoBananaNode:
                 }),
                 "api_key": ("STRING", {
                     "multiline": False,
-                    "default": CONFIG.get(CONFIG_SECTION, "api_key", fallback=""),
+                    "default": CONFIG.get(CONFIG_SECTION, "api_key", fallback=CONFIG.get("DEFAULT", "api_key", fallback="")),
                     "label": "🔑 API密钥"
                 }),
                 "base_url": ("STRING", {
                     "multiline": False,
-                    "default": CONFIG.get(CONFIG_SECTION, "api_url", fallback="https://api.openai.com/v1/images/generations"),
+                    "default": CONFIG.get(CONFIG_SECTION, "api_url", fallback=CONFIG.get("DEFAULT", "api_url", fallback="https://api.openai.com/v1/images/generations")),
                     "label": "🌐 API地址"
                 }),
                 "model": (list(MODEL_MAP.keys()), {
@@ -259,10 +259,11 @@ class NanoBananaNode:
                     "default": "1:1",
                     "label": "📐 宽高比"
                 }),
-                "response_format": (list(RESPONSE_FORMAT_MAP.keys()), {
-                    "default": "URL",
-                    "label": "📦 响应格式"
-                }),
+                # 响应格式暂时写死为 Base64
+                # "response_format": (list(RESPONSE_FORMAT_MAP.keys()), {
+                #     "default": "URL",
+                #     "label": "📦 响应格式"
+                # }),
                 "timeout": ("INT", {
                     "default": 120,
                     "min": 30,
@@ -310,22 +311,36 @@ class NanoBananaNode:
         return time.time()
     
     def generate_image(self, prompt, api_key, base_url, model, aspect_ratio, 
-                       response_format, timeout, max_retries, n,
+                       timeout, max_retries, n,
                        image_size="none",
                        image1=None, image2=None, image3=None, image4=None):
         """主生成函数"""
         
-        # 保存配置到独立配置节
-        if not CONFIG.has_section(CONFIG_SECTION):
-            CONFIG.add_section(CONFIG_SECTION)
+        # 写死响应格式为 Base64
+        response_format = "Base64"
         
+        # 保存配置到独立配置节（每次重新读取确保数据最新）
+        config_writer = configparser.ConfigParser()
+        if CONFIG_PATH.exists():
+            config_writer.read(CONFIG_PATH, encoding="utf-8")
+        
+        if not config_writer.has_section(CONFIG_SECTION):
+            config_writer.add_section(CONFIG_SECTION)
+        
+        # 只保存非空的配置项
         if api_key.strip():
-            CONFIG.set(CONFIG_SECTION, "api_key", api_key.strip())
+            config_writer.set(CONFIG_SECTION, "api_key", api_key.strip())
+            print(f"[CONFIG] 保存 api_key 到配置文件")
         if base_url.strip():
-            CONFIG.set(CONFIG_SECTION, "api_url", base_url.strip())
+            config_writer.set(CONFIG_SECTION, "api_url", base_url.strip())
+            print(f"[CONFIG] 保存 api_url 到配置文件: {base_url.strip()}")
         
-        with CONFIG_PATH.open("w", encoding="utf-8") as fp:
-            CONFIG.write(fp)
+        try:
+            with CONFIG_PATH.open("w", encoding="utf-8") as fp:
+                config_writer.write(fp)
+            print(f"[CONFIG] 配置已成功写入: {CONFIG_PATH}")
+        except Exception as e:
+            print(f"[ERROR] 配置写入失败: {e}")
         
         # 打印输入参数（调试用）
         print("\n" + "="*60)

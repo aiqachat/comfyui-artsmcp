@@ -229,6 +229,7 @@ Gemini Banana
 - `api_key` (STRING): API 密钥
 - `base_url` (STRING): API 服务地址（默认：`api.cozex.cn`）
 - `model` (下拉框): 模型选择
+  - `doubao-seedance-1-5-pro-251215` ⭐ **(推荐，最新版，支持音频生成)**
   - `doubao-seedance-1-0-pro-fast-251015` (快速版)
   - `doubao-seedance-1-0-pro-250528` (标准版)
 
@@ -253,6 +254,10 @@ Gemini Banana
   - ℹ️ **重要**：seed 值不会自动变化，保持用户设置的值不变
 - `camerafixed` (BOOLEAN): 是否固定摄像头（仅文生视频支持）
 - `watermark` (BOOLEAN): 是否添加水印（默认：False）
+- `generate_audio` (BOOLEAN): 是否生成包含画面同步音频的视频（默认：True）
+  - ⭐ **新功能**：仅 Seedance 1.5 pro 支持
+  - `True`: 生成带有画面同步音频的视频
+  - `False`: 生成无声视频
 
 *系统参数：*
 - `debug_mode` (BOOLEAN): 调试模式，输出完整 API 响应（默认：False）

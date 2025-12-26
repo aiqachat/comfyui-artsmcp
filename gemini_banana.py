@@ -24,11 +24,18 @@ else:
     with CONFIG_PATH.open("w", encoding="utf-8") as fp:
         CONFIG.write(fp)
 
-# 图像尺寸映射（Gemini 支持 1K, 2K, 4K）
+# 图像尺寸映射（Gemini 支持多种宽高比）
 IMAGE_SIZE_MAP = {
-    "1K": "1K",
-    "2K": "2K",
-    "4K": "4K",
+    "1:1": "1:1",
+    "2:3": "2:3",
+    "3:2": "3:2",
+    "3:4": "3:4",
+    "4:3": "4:3",
+    "4:5": "4:5",
+    "5:4": "5:4",
+    "9:16": "9:16",
+    "16:9": "16:9",
+    "21:9": "21:9",
 }
 
 # 模型映射
@@ -146,7 +153,8 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
             response.raise_for_status()
             
             result = response.json()
-            print(f"[SUCCESS] 请求成功！响应数据: {json.dumps(result, ensure_ascii=False)[:200]}...")
+            print(f"[SUCCESS] 请求成功！")
+            print(f"[DEBUG] 完整响应数据: {json.dumps(result, ensure_ascii=False, indent=2)}")
             
             # 成功后关闭
             response.close()
@@ -243,8 +251,8 @@ class GeminiBananaNode:
                     "label": "🧠 模型"
                 }),
                 "size": (list(IMAGE_SIZE_MAP.keys()), {
-                    "default": "2K",
-                    "label": "📐 尺寸"
+                    "default": "1:1",
+                    "label": "📐 宽高比"
                 }),
                 "response_format": (list(RESPONSE_FORMAT_MAP.keys()), {
                     "default": "URL",
@@ -367,20 +375,48 @@ class GeminiBananaNode:
             # 解析响应
             output_tensors = []
             
+            print(f"[DEBUG] 检查响应结构...")
+            print(f"[DEBUG] 响应包含的键: {list(result.keys())}")
+            
             if "data" in result:
                 data = result["data"]
+                print(f"[DEBUG] data 类型: {type(data)}")
+                print(f"[DEBUG] data 内容: {data}")
+                
                 if isinstance(data, list):
-                    for item in data:
+                    print(f"[DEBUG] data 是列表，长度: {len(data)}")
+                    for idx, item in enumerate(data):
+                        print(f"[DEBUG] 处理第 {idx+1} 个图片项...")
+                        print(f"[DEBUG] 图片项类型: {type(item)}")
+                        print(f"[DEBUG] 图片项内容: {item}")
+                        print(f"[DEBUG] 图片项包含的键: {list(item.keys()) if isinstance(item, dict) else 'N/A'}")
+                        print(f"[DEBUG] 期望的响应格式: {response_format_value}")
+                        
                         tensor = self._process_image_item(item, response_format_value, timeout)
                         if tensor is not None:
                             output_tensors.append(tensor)
+                            print(f"[DEBUG] ✅ 第 {idx+1} 个图片转换成功")
+                        else:
+                            print(f"[DEBUG] ❌ 第 {idx+1} 个图片转换失败")
+                            
                 elif isinstance(data, dict):
+                    print(f"[DEBUG] data 是字典")
+                    print(f"[DEBUG] 字典包含的键: {list(data.keys())}")
+                    print(f"[DEBUG] 期望的响应格式: {response_format_value}")
+                    
                     tensor = self._process_image_item(data, response_format_value, timeout)
                     if tensor is not None:
                         output_tensors.append(tensor)
+                        print(f"[DEBUG] ✅ 图片转换成功")
+                    else:
+                        print(f"[DEBUG] ❌ 图片转换失败")
+            else:
+                print(f"[ERROR] 响应中没有 'data' 字段！")
             
             if not output_tensors:
-                print("[WARN] 未获取到任何图片，返回默认黑色图片")
+                print("[ERROR] ❌ 未获取到任何图片数据！")
+                print(f"[DEBUG] 输出 tensors 数量: {len(output_tensors)}")
+                print("[WARN] 返回默认黑色图片")
                 return (torch.zeros((1, 512, 512, 3)),)
             
             # 合并所有 tensor
@@ -401,11 +437,20 @@ class GeminiBananaNode:
     
     def _process_image_item(self, item: dict, format_type: str, timeout: int):
         """处理单个图片数据项"""
+        print(f"[DEBUG] _process_image_item 调用: format_type={format_type}")
+        print(f"[DEBUG] item 内容: {item}")
+        
         if format_type == "url" and "url" in item:
+            print(f"[DEBUG] 匹配到 URL 格式，开始下载...")
             return download_image_to_tensor(item["url"], timeout)
         elif format_type == "b64_json" and "b64_json" in item:
+            print(f"[DEBUG] 匹配到 Base64 格式，开始解码...")
             return base64_to_tensor(item["b64_json"])
-        return None
+        else:
+            print(f"[ERROR] 未匹配到任何格式！")
+            print(f"[DEBUG] 期望格式: {format_type}")
+            print(f"[DEBUG] item 包含的键: {list(item.keys()) if isinstance(item, dict) else 'N/A'}")
+            return None
 
 
 # ComfyUI 节点映射
