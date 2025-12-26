@@ -22,7 +22,7 @@ ComfyUI 插件，集成多种 AI API 进行专业的图像和视频生成：
 - ✅ **图生图**：单图输入生成新图片
 - ✅ **多图融合**：融合多张图片生成新图片（最多4张）
 - ✅ 支持 Gemini 3 Pro Image 模型（1K/2K/4K）
-- ✅ 支持 1K/2K/4K 分辨率
+- ✅ 支持 10 种宽高比（1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9）
 - ✅ 支持 URL 和 Base64 两种响应格式
 - ✅ 自动重试机制（智能错误处理）
 - ✅ 独立配置管理
@@ -126,7 +126,7 @@ Nano Banana
 {
   "model": "gemini-3-pro-image-preview-2k",
   "prompt": "星际穿越，黑洞，电影大片，超现实主义",
-  "size": "2K",
+  "size": "1:1",
   "n": 1,
   "response_format": "url"
 }
@@ -138,12 +138,12 @@ Nano Banana
 |------|------|------|--------|
 | `提示词` | STRING | 图片生成的文本描述 | 支持中英文 |
 | `API密钥` | STRING | API 身份验证密钥 | sk-xxx |
-| `API地址` | STRING | API 服务端点 | 默认：https://apitt.cozex.cn/v1/images/generations |
+| `API地址` | STRING | API 服务端点 | 默认：https://api.openai.com/v1/images/generations |
 | `模型` | ENUM | 选择模型 | gemini-3-pro-image-preview / 2k / 4k |
-| `尺寸` | ENUM | 图片分辨率 | 1K / 2K / 4K |
+| `宽高比` | ENUM | 图片宽高比 | 1:1 / 2:3 / 3:2 / 3:4 / 4:3 / 4:5 / 5:4 / 9:16 / 16:9 / 21:9 |
 | `响应格式` | ENUM | 返回格式 | URL / Base64 |
 | `超时(秒)` | INT | API 请求超时时间 | 30-600，默认120 |
-| `最大重试次数` | INT | 失败后重试次数 | 1-10，默认3 |
+| `最大重试次数` | INT | 失败后重试次数 | 1-10，默认1 |
 | `生图数量` | INT | 一次生成图片数量 | 1-10，默认1 |
 | `图片1-4` | IMAGE | 可选输入图片 | 用于图生图/多图融合 |
 
@@ -157,7 +157,7 @@ Nano Banana
 Gemini Banana
   ├─ 提示词: "星际穿越，黑洞，电影大片"
   ├─ 模型: gemini-3-pro-image-preview-2k
-  ├─ 尺寸: 2K
+  ├─ 宽高比: 16:9
   ├─ 生图数量: 3
   ├─ 响应格式: URL
   └─ 图片输出 ──→ SaveImage
