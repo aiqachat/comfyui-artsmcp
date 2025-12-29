@@ -26,7 +26,7 @@ from .nano_banana_node import (
 )
 
 # 导入 Gemini Banana 图片生成节点
-from .gemini_banana import (
+from .gemini_image_node import (
     NODE_CLASS_MAPPINGS as NODE_CLASS_MAPPINGS_GEMINI_BANANA,
     NODE_DISPLAY_NAME_MAPPINGS as NODE_DISPLAY_NAME_MAPPINGS_GEMINI_BANANA
 )
