@@ -11,7 +11,7 @@ import numpy as np
 import requests
 import torch
 import urllib3
-from PIL import Image
+from PIL import Image, ImageOps
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -282,7 +282,7 @@ class GeminiBananaNode:
                 }),
                 "API地址": ("STRING", {
                     "multiline": False,
-                    "default": CONFIG.get(CONFIG_SECTION, "api_url", fallback="https://api.openai.com/v1/images/generations")
+                    "default": CONFIG.get(CONFIG_SECTION, "api_url", fallback="https://api.openai.com")
                 }),
                 "模型": (list(MODEL_MAP.keys()), {
                     "default": list(MODEL_MAP.keys())[0]
@@ -316,6 +316,11 @@ class GeminiBananaNode:
                 }),
                 "详细日志": ("BOOLEAN", {
                     "default": False
+                }),
+                "匹配参考尺寸": ("BOOLEAN", {
+                    "default": True,
+                    "label_on": "开启",
+                    "label_off": "关闭"
                 }),
             },
             "optional": {
@@ -697,7 +702,7 @@ class GeminiBananaNode:
         
         return batch_tensor
     
-    def generate_image(self, 提示词, 启用分行提示词, 每行并发请求数, 详细日志,
+    def generate_image(self, 提示词, 启用分行提示词, 每行并发请求数, 详细日志, 匹配参考尺寸,
                        API密钥, API地址, 模型, 宽高比, 
                        响应格式, 超时时间秒, 最大重试次数,
                        参考图片1=None, 参考图片2=None, 参考图片3=None, 参考图片4=None):
@@ -710,6 +715,7 @@ class GeminiBananaNode:
         prompt = 提示词
         enable_multiline = 启用分行提示词
         concurrent_requests = 每行并发请求数
+        match_reference_size = 匹配参考尺寸
         api_key = API密钥
         base_url = API地址
         model = 模型
@@ -742,6 +748,16 @@ class GeminiBananaNode:
         size_value = IMAGE_SIZE_MAP[size]
         response_format_value = RESPONSE_FORMAT_MAP[response_format]
         
+        # 处理 API 地址：确保是完整的 URL
+        if base_url.startswith('http://') or base_url.startswith('https://'):
+            # 如果已经是完整 URL，检查是否包含路径
+            if '/v1/images/generations' not in base_url:
+                # 只有域名，需要添加路径
+                base_url = base_url.rstrip('/') + '/v1/images/generations'
+        else:
+            # 如果只是域名，添加协议和路径
+            base_url = f"https://{base_url}/v1/images/generations"
+        
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -752,6 +768,8 @@ class GeminiBananaNode:
             prompts = self._prepare_prompts(prompt, enable_multiline, concurrent_requests)
             
             # 步骤2: 准备输入图片
+            input_images = [参考图片1, 参考图片2, 参考图片3, 参考图片4]
+            input_images = [img for img in input_images if img is not None]
             image_urls = self._prepare_input_images(参考图片1, 参考图片2, 参考图片3, 参考图片4)
             
             # 步骤3: 构建请求任务
@@ -768,6 +786,10 @@ class GeminiBananaNode:
             
             # 步骤6: 下载图片
             output_tensors = self._download_images(download_tasks, response_format_value, timeout)
+            
+            # 步骤6.5: 如果启用"匹配参考尺寸"且有参考图片，则调整输出尺寸
+            if match_reference_size and input_images:
+                output_tensors = self._match_reference_size(output_tensors, input_images)
             
             # 步骤7: 合并 tensor
             batch_tensor = self._merge_tensors(output_tensors, prompts, concurrent_requests, enable_multiline)
@@ -799,7 +821,49 @@ class GeminiBananaNode:
             self.log(f"[DEBUG] 期望格式: {format_type}", "DEBUG")
             self.log(f"[DEBUG] item 包含的键: {list(item.keys()) if isinstance(item, dict) else 'N/A'}", "DEBUG")
             return None
-
+    
+    def _match_reference_size(self, output_tensors, input_images):
+        """匹配参考图片尺寸 - 使用第一张参考图的尺寸作为目标"""
+        if not output_tensors or not input_images:
+            return output_tensors
+        
+        # 获取第一张参考图的尺寸 (tensor shape: [H, W, C])
+        ref_tensor = input_images[0]
+        if len(ref_tensor.shape) > 3:
+            ref_tensor = ref_tensor[0]  # 如果是批次，取第一张
+        
+        target_h = ref_tensor.shape[0]
+        target_w = ref_tensor.shape[1]
+        
+        print(f"\n{'='*60}")
+        print(f"[INFO] 启用匹配参考尺寸功能")
+        print(f"[INFO] 参考图尺寸: {target_w}×{target_h}")
+        print(f"[INFO] 待处理图片数量: {len(output_tensors)}")
+        print(f"{'='*60}\n")        
+        matched_tensors = []
+        for idx, tensor in enumerate(output_tensors):
+            current_h, current_w = tensor.shape[0], tensor.shape[1]
+            
+            if current_h == target_h and current_w == target_w:
+                self.log(f"[DEBUG] 图片{idx+1} 尺寸已匹配，跳过调整", "DEBUG")
+                matched_tensors.append(tensor)
+            else:
+                print(f"[INFO] 图片{idx+1}: {current_w}×{current_h} → {target_w}×{target_h} (缩放+裁剪)")                
+                # 转换为 PIL Image
+                array = (tensor.cpu().numpy() * 255.0).astype(np.uint8)
+                pil_image = Image.fromarray(array, mode='RGB')
+                
+                # 使用 ImageOps.fit 进行智能缩放+居中裁剪
+                resized_image = ImageOps.fit(pil_image, (target_w, target_h), method=Image.LANCZOS)
+                
+                # 转回 tensor
+                resized_array = np.array(resized_image).astype(np.float32) / 255.0
+                resized_tensor = torch.from_numpy(resized_array)
+                
+                matched_tensors.append(resized_tensor)
+        
+        print(f"[SUCCESS] ✅ 已将 {len(matched_tensors)} 张图片调整为参考尺寸 {target_w}×{target_h}\n")
+        return matched_tensors
 
 # ComfyUI 节点映射
 NODE_CLASS_MAPPINGS = {
