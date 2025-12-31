@@ -37,6 +37,7 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+config.ini
 
 # ComfyUI
 *.ckpt
