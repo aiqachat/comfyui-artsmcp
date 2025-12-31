@@ -15,12 +15,13 @@ from PIL import Image
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 CATEGORY = "artsmcp"
+CONFIG_SECTION = "VideoGenerationPro"  # 独立配置节
 CONFIG_PATH = Path(__file__).parent / "config.ini"
 CONFIG = configparser.ConfigParser()
 if CONFIG_PATH.exists():
     CONFIG.read(CONFIG_PATH, encoding="utf-8")
 else:
-    CONFIG["DEFAULT"] = {}
+    CONFIG[CONFIG_SECTION] = {}  # 使用独立配置节
     with CONFIG_PATH.open("w", encoding="utf-8") as fp:
         CONFIG.write(fp)
 
@@ -288,12 +289,12 @@ class VideoGenerationProNode:
                 }),
                 "api_key": ("STRING", {
                     "multiline": False,
-                    "default": CONFIG["DEFAULT"].get("video_api_key", ""),
+                    "default": CONFIG.get(CONFIG_SECTION, "video_api_key", fallback=""),
                     "label": "🔑 API密钥"
                 }),
                 "base_url": ("STRING", {
                     "multiline": False,
-                    "default": CONFIG["DEFAULT"].get("video_api_url", "https://api.openai.com/v1/video/generations"),
+                    "default": CONFIG.get(CONFIG_SECTION, "video_api_url", fallback="https://api.openai.com/v1/video/generations"),
                     "label": "🌐 API地址"
                 }),
                 "model_type": (["Doubao", "即梦"], {
@@ -347,7 +348,7 @@ class VideoGenerationProNode:
                 }),
                 "output_dir": ("STRING", {
                     "multiline": False,
-                    "default": CONFIG["DEFAULT"].get("output_dir", "ComfyUI/output"),
+                    "default": CONFIG.get(CONFIG_SECTION, "output_dir", fallback="ComfyUI/output"),
                     "label": "📁 输出目录"
                 }),
                 "poll_interval": ("INT", {
@@ -398,15 +399,23 @@ class VideoGenerationProNode:
                        camera_template="无", camera_strength="中"):
         """主生成函数"""
         
-        # 保存配置
+        # 保存配置到独立配置节（重新读取确保不覆盖其他节点配置）
+        config_writer = configparser.ConfigParser()
+        if CONFIG_PATH.exists():
+            config_writer.read(CONFIG_PATH, encoding="utf-8")
+        
+        if not config_writer.has_section(CONFIG_SECTION):
+            config_writer.add_section(CONFIG_SECTION)
+        
         if api_key.strip():
-            CONFIG["DEFAULT"]["video_api_key"] = api_key.strip()
+            config_writer.set(CONFIG_SECTION, "video_api_key", api_key.strip())
         if base_url.strip():
-            CONFIG["DEFAULT"]["video_api_url"] = base_url.strip()
+            config_writer.set(CONFIG_SECTION, "video_api_url", base_url.strip())
         if output_dir.strip():
-            CONFIG["DEFAULT"]["output_dir"] = output_dir.strip()
+            config_writer.set(CONFIG_SECTION, "output_dir", output_dir.strip())
+        
         with CONFIG_PATH.open("w", encoding="utf-8") as fp:
-            CONFIG.write(fp)
+            config_writer.write(fp)
         
         # 打印输入参数（调试用）
         print("\n" + "="*60)

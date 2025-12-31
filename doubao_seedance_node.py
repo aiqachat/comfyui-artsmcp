@@ -124,35 +124,10 @@ class DoubaoSeedanceNode:
     
     def create_placeholder_video(self):
         """
-        创建一个占位符 VideoObject（用于错误情况）
-        生成一个黑色的 1 秒视频文件
+        【已废弃】创建占位符视频
+        现在失败时直接抛出异常，不再创建占位符
         """
-        try:
-            output_dir = folder_paths.get_output_directory()
-            timestamp = int(time.time() * 1000)
-            filename = f"doubao_seedance_placeholder_{timestamp}.mp4"
-            filepath = os.path.join(output_dir, filename)
-            
-            # 使用 OpenCV 创建一个简单的黑色视频
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(filepath, fourcc, 24.0, (640, 480))
-            
-            # 写入24帧黑色画面（1秒）
-            black_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            for _ in range(24):
-                out.write(black_frame)
-            
-            out.release()
-            print(f"⚠️ Created placeholder video: {filepath}")
-            
-            return VideoObject(filepath, is_placeholder=False)
-        except Exception as e:
-            print(f"⚠️ Failed to create placeholder video file: {e}")
-            import traceback
-            traceback.print_exc()
-            # 创建一个虚拟的 VideoObject（使用 is_placeholder=True）
-            print(f"⚠️ Using virtual placeholder VideoObject")
-            return VideoObject("", is_placeholder=True)
+        raise RuntimeError("此方法已废弃，失败时应直接抛出异常")
     
     @classmethod
     def INPUT_TYPES(cls):
@@ -424,9 +399,11 @@ class DoubaoSeedanceNode:
     def download_video(self, video_url):
         """
         从URL下载视频文件并返回 VideoObject
+        优化：直接保存到 output/ 目录，避免二次复制
         """
+        response = None
         try:
-            print(f"Downloading video from: {video_url}")
+            print(f"正在下载视频: {video_url}")
             
             # 获取ComfyUI的output目录
             output_dir = folder_paths.get_output_directory()
@@ -446,20 +423,31 @@ class DoubaoSeedanceNode:
                     if chunk:
                         f.write(chunk)
             
-            print(f"✓ Video downloaded successfully: {filepath}")
+            # 关闭response连接
+            response.close()
+            
+            print(f"✓ 视频下载成功: {filepath}")
             
             # 创建并返回 VideoObject
             video_obj = VideoObject(filepath)
-            print(f"✓ Video info: {video_obj}")
+            print(f"✓ 视频信息: {video_obj}")
             
             return video_obj
             
         except Exception as e:
-            print(f"✗ Error downloading video: {e}")
+            # 确保关闭连接
+            if response:
+                response.close()
+            
+            error_msg = f"视频下载失败: {e}"
+            print(f"\n{'='*60}")
+            print(f"❌ {error_msg}")
             import traceback
             traceback.print_exc()
-            print(f"⚠️ Returning placeholder video due to download failure")
-            return self.create_placeholder_video()
+            print(f"{'='*60}\n")
+            
+            # 直接抛出异常，不返回占位符
+            raise RuntimeError(error_msg)
     
     def query_video_status(self, task_id, api_key, base_url, timeout=30, max_retries=3):
         """
@@ -540,17 +528,21 @@ class DoubaoSeedanceNode:
                 print(f"{'='*60}\n")
                 raise ValueError(error_msg)
             
-            # 保存配置到独立配置节
-            if not CONFIG.has_section(CONFIG_SECTION):
-                CONFIG.add_section(CONFIG_SECTION)
+            # 保存配置到独立配置节（重新读取确保不覆盖其他节点配置）
+            config_writer = configparser.ConfigParser()
+            if CONFIG_PATH.exists():
+                config_writer.read(CONFIG_PATH, encoding="utf-8")
+            
+            if not config_writer.has_section(CONFIG_SECTION):
+                config_writer.add_section(CONFIG_SECTION)
             
             if API密钥.strip():
-                CONFIG.set(CONFIG_SECTION, "api_key", API密钥.strip())
+                config_writer.set(CONFIG_SECTION, "api_key", API密钥.strip())
             if API地址.strip():
-                CONFIG.set(CONFIG_SECTION, "api_url", API地址.strip())
+                config_writer.set(CONFIG_SECTION, "api_url", API地址.strip())
             
             with CONFIG_PATH.open("w", encoding="utf-8") as fp:
-                CONFIG.write(fp)
+                config_writer.write(fp)
             
             # 打印输入参数（调试用）
             print("\n" + "="*60)
@@ -662,8 +654,11 @@ class DoubaoSeedanceNode:
                                 # 检查 ComfyUI 中断信号
                                 if COMFY_INTERRUPT_AVAILABLE:
                                     if model_management.processing_interrupted():
-                                        print("\n⚠️ Video generation interrupted by ComfyUI")
-                                        return (self.create_placeholder_video(),)
+                                        error_msg = "用户在 ComfyUI 中中断了视频生成"
+                                        print(f"\n{'='*60}")
+                                        print(f"❌ {error_msg}")
+                                        print(f"{'='*60}\n")
+                                        raise RuntimeError(error_msg)
                                 
                                 status_result = self.query_video_status(task_id, API密钥, API地址)
                                 
@@ -710,8 +705,11 @@ class DoubaoSeedanceNode:
                                             # 下载视频文件并创建 VideoObject
                                             video_obj = self.download_video(video_url)
                                             if video_obj is None:
-                                                print("✗ Failed to download video, returning placeholder")
-                                                return (self.create_placeholder_video(),)
+                                                error_msg = "视频下载失败"
+                                                print(f"\n{'='*60}")
+                                                print(f"❌ {error_msg}")
+                                                print(f"{'='*60}\n")
+                                                raise RuntimeError(error_msg)
                                             
                                             # ========== return_last_frame 功能已注释 ==========
                                             # 注释原因：上游中转站暂不支持 return_last_frame 参数
@@ -807,8 +805,11 @@ class DoubaoSeedanceNode:
                                     
                                     elif status in ['failed', 'error']:
                                         error_msg = inner_data.get('error', {}).get('message', 'Unknown error')
-                                        print(f"✗ Video generation failed: {error_msg}")
-                                        return (self.create_placeholder_video(),)
+                                        error_detail = f"视频生成失败: {error_msg}"
+                                        print(f"\n{'='*60}")
+                                        print(f"❌ {error_detail}")
+                                        print(f"{'='*60}\n")
+                                        raise RuntimeError(error_detail)
                                     
                                     elif status == 'queued':
                                         print(f"  ⏳ Task is queued, waiting...")
@@ -819,20 +820,29 @@ class DoubaoSeedanceNode:
                                         unknown_count = 0  # 重置计数器
 
                                     elif status == 'cancelled':
-                                        print(f"✗ Task was cancelled")
-                                        return (self.create_placeholder_video(),)
+                                        error_msg = "任务已被取消"
+                                        print(f"\n{'='*60}")
+                                        print(f"❌ {error_msg}")
+                                        print(f"{'='*60}\n")
+                                        raise RuntimeError(error_msg)
                                     
                                     elif status == 'expired':
-                                        print(f"✗ Task expired (timeout)")
-                                        return (self.create_placeholder_video(),)
+                                        error_msg = "任务已过期（超时）"
+                                        print(f"\n{'='*60}")
+                                        print(f"❌ {error_msg}")
+                                        print(f"{'='*60}\n")
+                                        raise RuntimeError(error_msg)
                                     
                                     elif status == 'unknown':
                                         unknown_count += 1
                                         print(f"  ⚠️ Unknown status (retry {unknown_count}/{max_unknown_retries})")
                                         if unknown_count >= max_unknown_retries:
-                                            print(f"✗ Too many unknown status responses, aborting")
-                                            print(f"Raw response: {json.dumps(status_result, ensure_ascii=False)[:300]}")
-                                            return (self.create_placeholder_video(),)
+                                            error_msg = f"连续 {max_unknown_retries} 次收到未知状态，任务可能异常"
+                                            print(f"\n{'='*60}")
+                                            print(f"❌ {error_msg}")
+                                            print(f"原始响应: {json.dumps(status_result, ensure_ascii=False)[:300]}")
+                                            print(f"{'='*60}\n")
+                                            raise RuntimeError(error_msg)
                                     else:
                                         # 其他未知状态
                                         print(f"  ℹ️ Status: {status}")
@@ -845,40 +855,58 @@ class DoubaoSeedanceNode:
                                 # 将睡眠拆分成多个小睡眠，每0.5秒检查一次中断
                                 for i in range(轮询间隔 * 2):
                                     if COMFY_INTERRUPT_AVAILABLE and model_management.processing_interrupted():
-                                        print("\n⚠️ Video generation interrupted by ComfyUI")
-                                        return (self.create_placeholder_video(),)
+                                        error_msg = "用户在 ComfyUI 中中断了视频生成"
+                                        print(f"\n{'='*60}")
+                                        print(f"❌ {error_msg}")
+                                        print(f"{'='*60}\n")
+                                        raise RuntimeError(error_msg)
                                     time.sleep(0.5)
                         
                         except KeyboardInterrupt:
-                            print("\n⚠️ Video generation interrupted by user (Ctrl+C)")
-                            print(f"Task ID: {task_id} (you can query this later if needed)")
-                            return (self.create_placeholder_video(),)
+                            error_msg = f"用户通过 Ctrl+C 中断了视频生成\n任务ID: {task_id} (可稍后查询)"
+                            print(f"\n{'='*60}")
+                            print(f"❌ {error_msg}")
+                            print(f"{'='*60}\n")
+                            raise RuntimeError(error_msg)
                         
                         # 超时
-                        print(f"[ERROR] 轮询超时，已等待 {最大等待时长} 秒")
+                        error_msg = f"轮询超时，已等待 {最大等待时长} 秒"
+                        print(f"\n{'='*60}")
+                        print(f"❌ {error_msg}")
+                        print(f"任务ID: {task_id}")
                         print(f"\n💡 可能的解决方案:")
-                        print(f"   1. 增加 max_poll_time 参数值")
+                        print(f"   1. 增加'最大等待时长'参数值")
                         print(f"   2. 检查视频生成任务是否正常")
-                        print(f"   3. 稍后使用任务ID查询: {task_id}")
-                        return (self.create_placeholder_video(),)
+                        print(f"   3. 稍后使用任务ID查询")
+                        print(f"{'='*60}\n")
+                        raise RuntimeError(error_msg)
                     else:
-                        print("[ERROR] 响应中未找到 task_id")
-                        print(f"[ERROR] 响应内容: {response_text[:300]}...")
-                        return (self.create_placeholder_video(),)
+                        error_msg = "API响应中未找到 task_id"
+                        print(f"\n{'='*60}")
+                        print(f"❌ {error_msg}")
+                        print(f"响应内容: {response_text[:300]}...")
+                        print(f"{'='*60}\n")
+                        raise RuntimeError(error_msg)
                         
                 except json.JSONDecodeError as e:
-                    print(f"Failed to parse JSON response: {e}")
-                    print("Raw response:", response_text[:500])
-                    return (self.create_placeholder_video(),)
+                    error_msg = f"JSON 解析失败: {e}"
+                    print(f"\n{'='*60}")
+                    print(f"❌ {error_msg}")
+                    print(f"原始响应: {response_text[:500]}")
+                    print(f"{'='*60}\n")
+                    raise RuntimeError(error_msg)
             else:
-                print(f"[ERROR] API调用失败，状态码: {status_code}")
-                print(f"[ERROR] 错误响应: {response_text[:500]}")
+                error_msg = f"API调用失败 (状态码: {status_code})"
+                print(f"\n{'='*60}")
+                print(f"❌ {error_msg}")
+                print(f"错误响应: {response_text[:500]}")
                 print(f"\n💡 可能的解决方案:")
                 print(f"   1. 检查 API Key 是否有效")
                 print(f"   2. 确认 API 服务地址是否正确")
                 print(f"   3. 查看错误信息，调整参数")
                 print(f"   4. 检查网络连接是否正常")
-                return (self.create_placeholder_video(),)
+                print(f"{'='*60}\n")
+                raise RuntimeError(error_msg)
             
         except Exception as e:
             # 关键:异常时直接抛出,不返回占位符视频,避免缓存错误结果

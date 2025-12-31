@@ -724,17 +724,21 @@ class GeminiBananaNode:
         timeout = 超时时间秒
         max_retries = 最大重试次数
         
-        # 保存配置到独立配置节
-        if not CONFIG.has_section(CONFIG_SECTION):
-            CONFIG.add_section(CONFIG_SECTION)
+        # 保存配置到独立配置节（重新读取确保不覆盖其他节点配置）
+        config_writer = configparser.ConfigParser()
+        if CONFIG_PATH.exists():
+            config_writer.read(CONFIG_PATH, encoding="utf-8")
+        
+        if not config_writer.has_section(CONFIG_SECTION):
+            config_writer.add_section(CONFIG_SECTION)
         
         if api_key.strip():
-            CONFIG.set(CONFIG_SECTION, "api_key", api_key.strip())
+            config_writer.set(CONFIG_SECTION, "api_key", api_key.strip())
         if base_url.strip():
-            CONFIG.set(CONFIG_SECTION, "api_url", base_url.strip())
+            config_writer.set(CONFIG_SECTION, "api_url", base_url.strip())
         
         with CONFIG_PATH.open("w", encoding="utf-8") as fp:
-            CONFIG.write(fp)
+            config_writer.write(fp)
         
         # 打印其他参数
         print(f"[INFO] 模型: {model}")

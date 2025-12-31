@@ -322,17 +322,21 @@ class DoubaoSeedreamNode:
                     print(f"   - 最大: 4096x4096 (16M)")
                 print(f"{'='*60}\n")
                 raise ValueError(error_msg)
-            # 保存配置到独立配置节
-            if not CONFIG.has_section(CONFIG_SECTION):
-                CONFIG.add_section(CONFIG_SECTION)
+            # 保存配置到独立配置节（重新读取确保不覆盖其他节点配置）
+            config_writer = configparser.ConfigParser()
+            if CONFIG_PATH.exists():
+                config_writer.read(CONFIG_PATH, encoding="utf-8")
+            
+            if not config_writer.has_section(CONFIG_SECTION):
+                config_writer.add_section(CONFIG_SECTION)
             
             if API密钥.strip():
-                CONFIG.set(CONFIG_SECTION, "api_key", API密钥.strip())
+                config_writer.set(CONFIG_SECTION, "api_key", API密钥.strip())
             if API地址.strip():
-                CONFIG.set(CONFIG_SECTION, "api_url", API地址.strip())
+                config_writer.set(CONFIG_SECTION, "api_url", API地址.strip())
             
             with CONFIG_PATH.open("w", encoding="utf-8") as fp:
-                CONFIG.write(fp)
+                config_writer.write(fp)
             
             # 根据max_images自动判断sequential_image_generation
             if 最大图片数量 > 0:

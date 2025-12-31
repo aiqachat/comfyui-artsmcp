@@ -16,8 +16,7 @@ parts/
 sdist/
 var/
 wheels/
-文档整理/
-ComfyUI_CY_Nodes/
+demo/
 *.egg-info/
 .installed.cfg
 *.egg
