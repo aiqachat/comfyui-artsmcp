@@ -2,16 +2,21 @@ import base64
 import configparser
 import io
 import json
+import threading
 from pathlib import Path
 from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import requests
 import torch
 import urllib3
-from PIL import Image
+from PIL import Image, ImageOps
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 线程本地存储,用于 Session 复用
+thread_local = threading.local()
 
 CATEGORY = "artsmcp"
 CONFIG_SECTION = "Nano-banana"  # 独立配置节
@@ -47,8 +52,9 @@ IMAGE_SIZE_MAP = {
 
 # 模型映射
 MODEL_MAP = {
-    "nano-banana": "gemini-2.5-flash-image-preview",
-    "nano-banana-2": "gemini-3-pro-image-preview",
+    # "nano-banana": "gemini-2.5-flash-image-preview",
+    "nano-banana-2": "nano-banana-2",
+    # "gemini-3-pro-image-preview": "gemini-3-pro-image-preview",
 }
 
 # 响应格式映射
@@ -70,6 +76,29 @@ def get_config_value(section, key, fallback=None):
         return fallback
 
 
+def get_session():
+    """获取线程本地的 Session (复用连接池,使用官方推荐的 HTTPAdapter 配置)"""
+    if not hasattr(thread_local, "session"):
+        # 创建 Session
+        session = requests.Session()
+        
+        # 使用 HTTPAdapter 精细控制连接池
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,  # 连接池数量
+            pool_maxsize=10,      # 每个连接池的最大连接数
+            max_retries=0         # 重试由上层 make_api_request 控制
+        )
+        
+        # 挂载到 http 和 https
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
+        # 存储到线程本地
+        thread_local.session = session
+    
+    return thread_local.session
+
+
 def tensor_to_base64(image_tensor):
     """将 ComfyUI tensor 转换为 base64 字符串"""
     if len(image_tensor.shape) > 3:
@@ -88,15 +117,14 @@ def tensor_to_base64(image_tensor):
 
 def download_image_to_tensor(url: str, timeout: int = 60):
     """从 URL 下载图片并转换为 tensor"""
-    session = None
     response = None
     
     try:
         print(f"[INFO] 正在下载图片: {url}")
         
-        # 使用独立 Session
-        session = requests.Session()
-        response = session.get(url, timeout=timeout, verify=False)
+        # 使用线程本地 Session (连接池复用)
+        session = get_session()
+        response = session.get(url, timeout=timeout, verify=False, stream=True)
         response.raise_for_status()
         
         pil_image = Image.open(io.BytesIO(response.content)).convert('RGB')
@@ -112,19 +140,22 @@ def download_image_to_tensor(url: str, timeout: int = 60):
         return None
         
     finally:
-        # 清理资源
+        # 清理资源 (但保留 Session 供线程复用)
         try:
             if response is not None:
                 response.close()
-            if session is not None:
-                session.close()
         except Exception as e:
             print(f"[WARN] 清理下载连接失败: {e}")
 
 
 def base64_to_tensor(b64_string: str):
-    """将 base64 字符串转换为 tensor"""
+    """将 base64 字符串转换为 tensor (支持 data URI 格式)"""
     try:
+        # 处理 data URI 格式 (如: data:image/png;base64,...)
+        if b64_string.startswith("data:image"):
+            # 提取实际的 base64 数据部分
+            b64_string = b64_string.split(",", 1)[1]
+        
         img_bytes = base64.b64decode(b64_string)
         pil_image = Image.open(io.BytesIO(img_bytes)).convert('RGB')
         numpy_image = np.array(pil_image).astype(np.float32) / 255.0
@@ -144,38 +175,22 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
     print(f"[INFO] 请求参数: {json.dumps(payload, ensure_ascii=False)[:200]}...")
     
     last_error = None
+    response = None
     
     for attempt in range(1, max_retries + 1):
-        # 在每次重试前检查 ComfyUI 中断标志
         try:
-            import comfy.model_management as mm
-            if mm.interrupt_current_processing():
-                print("[INFO] 检测到用户中断请求，停止重试")
-                raise InterruptedError("用户中断了请求")
-        except ImportError:
-            pass  # 如果不是在 ComfyUI 环境下运行，忽略
-        except Exception as e:
-            pass  # 中断检测失败也继续
-        # 关键：每次重试都创建新的 Session，避免连接池污染
-        session = requests.Session()
-        response = None
-        
-        try:
+            # 清理上次重试的 response
+            if response is not None:
+                response.close()
+                response = None
+            
             if attempt > 1:
                 wait_time = min(backoff ** (attempt - 1), 20)  # 指数退避: 2s, 4s, 8s, 最大20s
                 print(f"[INFO] 第 {attempt} 次重试，等待 {wait_time} 秒...")
-                
-                # 分段 sleep，每 0.5 秒检查一次中断
-                for _ in range(int(wait_time * 2)):
-                    time.sleep(0.5)
-                    try:
-                        import comfy.model_management as mm
-                        if mm.interrupt_current_processing():
-                            print("[INFO] 等待重试时检测到用户中断，立即退出")
-                            raise InterruptedError("用户中断了请求")
-                    except (ImportError, AttributeError):
-                        pass
+                time.sleep(wait_time)
             
+            # 使用线程本地 Session (连接池复用)
+            session = get_session()
             response = session.post(
                 url,
                 headers=headers,
@@ -190,22 +205,34 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
             # 检查是否成功
             response.raise_for_status()
             
-            # 尝试解析 JSON 响应，如果失败打印原始文本便于调试
+            # 打印响应头信息（用于调试）
+            print(f"[DEBUG] 响应 Content-Type: {response.headers.get('Content-Type', 'unknown')}")
+            print(f"[DEBUG] 响应 Content-Length: {response.headers.get('Content-Length', 'unknown')}")
+            
+            # 获取原始响应文本（用于调试）
+            response_text = response.text
+            print(f"[DEBUG] 响应原始文本（前500字符）: {response_text[:500]}")
+            
+            # 检查响应是否为空
+            if not response_text or response_text.strip() == "":
+                print(f"[ERROR] ❌ API 返回空响应！")
+                print(f"[ERROR] 这通常意味着 API 端点配置错误或 API 不支持当前请求格式")
+                raise ValueError("API 返回空响应，请检查 API 地址和请求格式是否正确")
+            
+            # 尝试解析 JSON
             try:
                 result = response.json()
-            except Exception as e:
-                try:
-                    print("[ERROR] 响应不是合法的 JSON，原始文本前500字符:")
-                    print(response.text[:500])
-                except Exception as e2:
-                    print(f"[ERROR] 读取响应文本失败: {e2}")
-                raise e
+            except json.JSONDecodeError as e:
+                print(f"[ERROR] ❌ JSON 解析失败: {e}")
+                print(f"[ERROR] 响应不是有效的 JSON 格式")
+                print(f"[DEBUG] 完整响应文本: {response_text}")
+                raise ValueError(f"API 返回的内容不是有效的 JSON 格式，响应内容: {response_text[:200]}...")
             
-            print(f"[SUCCESS] 请求成功！响应数据: {json.dumps(result, ensure_ascii=False)[:200]}...")
+            print(f"[SUCCESS] 请求成功！")
+            print(f"[DEBUG] 完整响应数据: {json.dumps(result, ensure_ascii=False, indent=2)}")
             
-            # 成功后关闭
+            # 成功后关闭 response (但保留 Session)
             response.close()
-            session.close()
             return result
             
         except requests.exceptions.HTTPError as exc:
@@ -227,7 +254,6 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
                 # 清理资源
                 if response:
                     response.close()
-                session.close()
                 raise
                 
         except requests.exceptions.Timeout as exc:
@@ -239,16 +265,33 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
             last_error = exc
             print(f"[ERROR] 连接失败 (尝试 {attempt}/{max_retries}): {exc}")
             
+        except ValueError as exc:
+            # JSON 解析错误或空响应，不应该重试
+            last_error = exc
+            print(f"[ERROR] 数据格式错误: {exc}")
+            print(f"[ERROR] 这不是临时错误，停止重试")
+            if response:
+                response.close()
+            raise
+            
         except Exception as exc:
             last_error = exc
             print(f"[ERROR] 未知错误 (尝试 {attempt}/{max_retries}): {exc}")
+            print(f"[DEBUG] 错误类型: {type(exc).__name__}")
+            # 打印响应内容用于调试
+            if response is not None:
+                try:
+                    print(f"[DEBUG] 响应状态码: {response.status_code}")
+                    print(f"[DEBUG] 响应头: {dict(response.headers)}")
+                    print(f"[DEBUG] 响应文本: {response.text[:500]}")
+                except:
+                    pass
         
         finally:
-            # 关键：无论成功还是失败，都必须清理资源
+            # 确保 response 被关闭 (但保留线程本地 Session)
             try:
                 if response is not None:
                     response.close()
-                session.close()
             except Exception as e:
                 print(f"[WARN] 清理连接失败: {e}")
         
@@ -272,71 +315,94 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
 
 
 class NanoBananaNode:
-    """Nano Banana 图片生成节点 - 支持文生图、图生图"""
+    """Nano Banana 图片生成节点 - 支持文生图、图生图、多图融合"""
+    
+    def __init__(self):
+        self.verbose = False  # 默认关闭详细日志
+    
+    def log(self, message, level="INFO"):
+        """统一日志输出 (支持分级)"""
+        if level == "DEBUG" and not self.verbose:
+            return  # DEBUG 日志只在 verbose 模式下打印
+        print(message)
     
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt": ("STRING", {
+                "提示词": ("STRING", {
                     "multiline": True,
                     "default": "一只可爱的猫咪,卡通风格,高清",
                     "label": "💬 提示词"
                 }),
-                "api_key": ("STRING", {
+                "API密钥": ("STRING", {
                     "multiline": False,
                     "default": CONFIG.get(CONFIG_SECTION, "api_key", fallback=CONFIG.get("DEFAULT", "api_key", fallback="")),
                     "label": "🔑 API密钥"
                 }),
-                "base_url": ("STRING", {
+                "API地址": ("STRING", {
                     "multiline": False,
-                    "default": CONFIG.get(CONFIG_SECTION, "api_url", fallback=CONFIG.get("DEFAULT", "api_url", fallback="https://api.openai.com/v1/images/generations")),
+                    "default": CONFIG.get(CONFIG_SECTION, "api_url", fallback=CONFIG.get("DEFAULT", "api_url", fallback="https://api.openai.com")),
                     "label": "🌐 API地址"
                 }),
-                "model": (list(MODEL_MAP.keys()), {
+                "模型": (list(MODEL_MAP.keys()), {
                     "default": list(MODEL_MAP.keys())[0],
                     "label": "🧠 模型"
                 }),
-                "aspect_ratio": (list(ASPECT_RATIO_MAP.keys()), {
+                "宽高比": (list(ASPECT_RATIO_MAP.keys()), {
                     "default": "1:1",
-                    "label": "📐 宽高比"
+                    "label": "📐 尺寸比例(size)"
+                }),
+                "分辨率": (list(IMAGE_SIZE_MAP.keys()) + ["none"], {
+                    "default": "2K",
+                    "label": "📏 分辨率"
                 }),
                 # 响应格式暂时写死为 Base64
-                # "response_format": (list(RESPONSE_FORMAT_MAP.keys()), {
+                # "响应格式": (list(RESPONSE_FORMAT_MAP.keys()), {
                 #     "default": "URL",
                 #     "label": "📦 响应格式"
                 # }),
-                "timeout": ("INT", {
+                "超时秒数": ("INT", {
                     "default": 120,
                     "min": 30,
                     "max": 600,
                     "step": 10,
                     "label": "⏱️ 超时(秒)"
                 }),
-                "max_retries": ("INT", {
+                "最大重试次数": ("INT", {
                     "default": 3,
                     "min": 1,
                     "max": 10,
                     "step": 1,
                     "label": "🔄 最大重试次数"
                 }),
-                "n": ("INT", {
+                "并发请求数": ("INT", {
                     "default": 1,
                     "min": 1,
                     "max": 10,
                     "step": 1,
-                    "label": "📊 生图数量"
+                    "label": "📊 并发请求数"
+                }),
+                "启用分行提示词": ("BOOLEAN", {
+                    "default": False,
+                    "label": "📝 启用分行提示词"
+                }),
+                "匹配参考尺寸": ("BOOLEAN", {
+                    "default": False,
+                    "label": "📸 匹配参考尺寸",
+                    "label_on": "开启",
+                    "label_off": "关闭"
+                }),
+                "详细日志": ("BOOLEAN", {
+                    "default": False,
+                    "label": "🔍 详细日志"
                 }),
             },
             "optional": {
-                "image_size": (list(IMAGE_SIZE_MAP.keys()) + ["none"], {
-                    "default": "none",
-                    "label": "📏 图像尺寸(仅nano-banana-2)"
-                }),
-                "image1": ("IMAGE", {"label": "🖼️ 参考图片1"}),
-                "image2": ("IMAGE", {"label": "🖼️ 参考图片2"}),
-                "image3": ("IMAGE", {"label": "🖼️ 参考图片3"}),
-                "image4": ("IMAGE", {"label": "🖼️ 参考图片4"}),
+                "参考图片1": ("IMAGE", {"label": "🖼️ 参考图片1"}),
+                "参考图片2": ("IMAGE", {"label": "🖼️ 参考图片2"}),
+                "参考图片3": ("IMAGE", {"label": "🖼️ 参考图片3"}),
+                "参考图片4": ("IMAGE", {"label": "🖼️ 参考图片4"}),
             }
         }
     
@@ -352,11 +418,13 @@ class NanoBananaNode:
         import time
         return time.time()
     
-    def generate_image(self, prompt, api_key, base_url, model, aspect_ratio, 
-                       timeout, max_retries, n,
-                       image_size="none",
-                       image1=None, image2=None, image3=None, image4=None):
-        """主生成函数"""
+    def generate_image(self, 提示词, API密钥, API地址, 模型, 宽高比, 分辨率, 
+                       超时秒数, 最大重试次数, 并发请求数, 启用分行提示词, 匹配参考尺寸, 详细日志,
+                       参考图片1=None, 参考图片2=None, 参考图片3=None, 参考图片4=None):
+        """主生成函数 - 重构为清晰的流程"""
+        
+        # 设置日志级别
+        self.verbose = 详细日志
         
         # 写死响应格式为 Base64
         response_format = "Base64"
@@ -370,12 +438,12 @@ class NanoBananaNode:
             config_writer.add_section(CONFIG_SECTION)
         
         # 只保存非空的配置项
-        if api_key.strip():
-            config_writer.set(CONFIG_SECTION, "api_key", api_key.strip())
+        if API密钥.strip():
+            config_writer.set(CONFIG_SECTION, "api_key", API密钥.strip())
             print(f"[CONFIG] 保存 api_key 到配置文件")
-        if base_url.strip():
-            config_writer.set(CONFIG_SECTION, "api_url", base_url.strip())
-            print(f"[CONFIG] 保存 api_url 到配置文件: {base_url.strip()}")
+        if API地址.strip():
+            config_writer.set(CONFIG_SECTION, "api_url", API地址.strip())
+            print(f"[CONFIG] 保存 api_url 到配置文件: {API地址.strip()}")
         
         try:
             with CONFIG_PATH.open("w", encoding="utf-8") as fp:
@@ -387,138 +455,306 @@ class NanoBananaNode:
         # 打印输入参数（调试用）
         print("\n" + "="*60)
         print("[Nano-Banana] 输入参数:")
-        print(f"  - 提示词: {prompt[:50]}...")
-        print(f"  - 模型: {model}")
-        print(f"  - 宽高比: {aspect_ratio}")
-        print(f"  - 图像尺寸: {image_size}")
+        print(f"  - 提示词: {提示词[:50]}...")
+        print(f"  - 模型: {模型}")
+        print(f"  - 宽高比: {宽高比}")
+        print(f"  - 分辨率: {分辨率}")
         print(f"  - 响应格式: {response_format}")
-        print(f"  - 生图数量: {n}")
+        print(f"  - 并发请求数: {并发请求数}")
         print("="*60 + "\n")
         
         # 收集输入图片
         input_images = []
-        for idx, img in enumerate([image1, image2, image3, image4], 1):
+        for idx, img in enumerate([参考图片1, 参考图片2, 参考图片3, 参考图片4], 1):
             if img is not None:
                 input_images.append(img)
-                print(f"[DEBUG] 检测到参考图片{idx}, 形状: {img.shape}")
+                self.log(f"[DEBUG] 检测到参考图片{idx}, 形状: {img.shape}", "DEBUG")
         
-        print(f"[DEBUG] 共收集到 {len(input_images)} 张参考图片")
+        self.log(f"[DEBUG] 共收集到 {len(input_images)} 张参考图片", "DEBUG")
         
-        # 构建请求参数（Gemini 官方请求体）
-        model_value = MODEL_MAP[model]
-        aspect_ratio_value = ASPECT_RATIO_MAP[aspect_ratio]
+        # 按 Gemini demo 构建请求参数（contents + parts + inline_data）
+        model_value = MODEL_MAP[模型]
+        size_value = ASPECT_RATIO_MAP[宽高比]  # 仅用于日志
         response_format_value = RESPONSE_FORMAT_MAP[response_format]
         
-        # 组装文本部分，可以把宽高比等信息写进提示词，方便控制
-        full_prompt = prompt
-        if aspect_ratio_value:
-            full_prompt += f"\nAspect ratio: {aspect_ratio_value}"
-        if image_size != "none" and model == "nano-banana-2":
-            full_prompt += f"\nImage size: {IMAGE_SIZE_MAP[image_size]}"
-        
-        parts = [{"text": full_prompt}]
-        
-        # 处理输入图片(支持多图) -> inline_data
-        if input_images:
-            for idx, img_tensor in enumerate(input_images):
-                base64_url = tensor_to_base64(img_tensor)
-                prefix = "data:image/jpeg;base64,"
-                if base64_url.startswith(prefix):
-                    b64_data = base64_url[len(prefix):]
-                else:
-                    b64_data = base64_url
-                parts.append({
-                    "inline_data": {
-                        "mime_type": "image/jpeg",
-                        "data": b64_data
-                    }
-                })
-                print(f"[INFO] 已转换图片{idx + 1}为 inline_data")
-            print(f"[INFO] 模式: 文本+参考图 ({len(input_images)} 张)")
+        # 组装提示词
+        if 启用分行提示词:
+            # 每一行作为一个独立的提示词，分别生成图片
+            prompt_lines = [line.strip() for line in 提示词.split('\n') if line.strip()]
+            print(f"[INFO] 启用分行提示词，共 {len(prompt_lines)} 行")
+            print(f"[INFO] 每行将各发送 {并发请求数} 个请求，总计: {len(prompt_lines) * 并发请求数} 个请求")
+            self.log(f"[DEBUG] 分行提示词内容: {prompt_lines}", "DEBUG")
         else:
-            print("[INFO] 模式: 文生图")
+            # 单行提示词
+            prompt_lines = [提示词]
         
-        payload = {
-            "contents": [
-                {
-                    "parts": parts
-                }
+        # 根据是否启用分行提示词，准备不同的 payload 列表
+        payload_list = []
+        
+        for line_idx, prompt_text in enumerate(prompt_lines, 1):
+            # 为每一行提示词构建独立的 payload
+            contents_parts = [
+                {"text": prompt_text}
             ]
-        }
+            
+            # 处理输入图片（图生图模式）
+            if input_images:
+                # 使用第一张参考图作为输入
+                base64_image = tensor_to_base64(input_images[0])
+                # tensor_to_base64 返回 data URI，需要提取逗号后面的纯 Base64 数据
+                if isinstance(base64_image, str) and base64_image.startswith("data:image"):
+                    base64_image = base64_image.split(",", 1)[1]
+                contents_parts.append(
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": base64_image
+                        }
+                    }
+                )
+            
+            # 构建 Gemini 原生请求体
+            payload = {
+                "contents": [
+                    {
+                        "parts": contents_parts
+                    }
+                ]
+            }
+
+            # 根据模型和节点参数，按需注入尺寸 / 比例配置
+            # 仅当确实设置了相关参数时才写入 payload，避免触发无效参数错误
+            image_config = {}
+
+            # 分辨率（原图像尺寸）
+            if 分辨率 and 分辨率 != "none":
+                image_size_value = IMAGE_SIZE_MAP.get(分辨率)
+                if image_size_value:
+                    image_config["imageSize"] = image_size_value
+
+            # 宽高比: 始终注入（文生图和图生图模式都支持）
+            if 宽高比 in ASPECT_RATIO_MAP:
+                aspect_ratio_value = ASPECT_RATIO_MAP[宽高比]
+                if aspect_ratio_value:
+                    image_config["aspectRatio"] = aspect_ratio_value
+
+            if image_config:
+                payload["generationConfig"] = {
+                    "imageConfig": image_config
+                }
+            
+            # 每个 prompt 都发送 N 次请求（N = 并发请求数）
+            for _ in range(并发请求数):
+                payload_list.append((line_idx, prompt_text, payload.copy()))
         
-        # 发送请求
+        # 打印模式信息
+        if input_images:
+            print(f"[INFO] 模式: 图生图（参考图数量: {len(input_images)}）")
+        else:
+            print("[INFO] 模式: 文生图（仅文本提示词）")
+        
+        self.log(f"[DEBUG] 最终 payload 顶层字段: {list(payload_list[0][2].keys())}", "DEBUG")
+        self.log(f"[DEBUG] 模型: {model_value}, 宽高比(仅日志): {size_value}", "DEBUG")
+        
+        # 按 Gemini demo 构建完整 URL:
+        # {base_url}/v1beta/models/{model}:generateContent?key={API密钥}
+        base_url = API地址.strip()
+        if not base_url:
+            base_url = "https://api.openai.com"
+        
+        if not (base_url.startswith("http://") or base_url.startswith("https://")):
+            base_url = "https://" + base_url
+        
+        base_url = base_url.rstrip("/")
+        final_url = f"{base_url}/v1beta/models/{model_value}:generateContent?key={API密钥.strip()}"
+        
+        print(f"[INFO] 解析后的完整 API 地址: {final_url}")
+        
+        # 发送请求（鉴权通过 URL 中的 key，Header 只需要 Content-Type）
         headers = {
-            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
         
-        # 打印完整的payload用于调试
-        print(f"[DEBUG] 完整 payload 结构:")
-        try:
-            print(json.dumps(payload, ensure_ascii=False)[:500] + "...")
-        except Exception as e:
-            print(f"[WARN] payload 序列化失败: {e}")
+        # 打印完整的payload用于调试（只打印第一个）
+        if payload_list:
+            print(f"[DEBUG] 完整 payload 结构（示例）:")
+            try:
+                print(json.dumps(payload_list[0][2], ensure_ascii=False)[:500] + "...")
+            except Exception as e:
+                print(f"[WARN] payload 序列化失败: {e}")
         
         try:
-            result = make_api_request(base_url, headers, payload, timeout, max_retries)
+            # 并发发送请求（支持分行提示词 + 生图数量）
+            total_requests = len(payload_list)
+            print(f"\n{'='*60}")
+            print(f"[INFO] 开始并发生成 {total_requests} 张图片...")
+            print(f"[INFO] 并发线程数: {min(total_requests, 5)}")
+            print(f"{'='*60}\n")
             
-            # 解析响应
+            results = []
+            with ThreadPoolExecutor(max_workers=min(total_requests, 5)) as executor:
+                # 提交所有请求任务
+                futures = [
+                    executor.submit(
+                        make_api_request, 
+                        final_url, 
+                        headers, 
+                        payload_data,  # 已经是副本
+                        超时秒数, 
+                        最大重试次数
+                    ) 
+                    for line_idx, prompt_text, payload_data in payload_list
+                ]
+                
+                # 等待所有请求完成并收集结果
+                for idx, future in enumerate(as_completed(futures), 1):
+                    try:
+                        result = future.result()
+                        results.append(result)
+                        print(f"[INFO] ✅ 第 {idx}/{total_requests} 个请求已完成")
+                    except Exception as e:
+                        print(f"[ERROR] ❌ 第 {idx}/{total_requests} 个请求失败: {e}")
+                        # 继续处理其他请求，不中断
+            
+            # 检查是否至少有一个成功的结果
+            if not results:
+                raise RuntimeError(f"所有 {total_requests} 个请求均失败，未获取到任何图片数据")
+            
+            print(f"\n{'='*60}")
+            print(f"[SUCCESS] ✅ 并发请求完成！")
+            print(f"[INFO] 成功: {len(results)}/{total_requests} 个请求")
+            if len(results) < total_requests:
+                print(f"[WARN] ⚠️ 部分请求失败，仅返回成功的图片")
+            print(f"{'='*60}\n")
+            
+            # 解析所有响应并合并输出
             output_tensors = []
             
-            print(f"[DEBUG] 检查响应结构...")
-            print(f"[DEBUG] 响应包含的键: {list(result.keys())}")
-            
-            if "data" in result:
-                data = result["data"]
-                print(f"[DEBUG] data 类型: {type(data)}")
-                print(f"[DEBUG] data 内容: {data}")
+            # 遍历所有请求的响应结果
+            for result_idx, result in enumerate(results, 1):
+                self.log(f"\n[DEBUG] ===== 处理第 {result_idx}/{len(results)} 个响应 =====", "DEBUG")
+                self.log(f"[DEBUG] 响应包含的键: {list(result.keys())}", "DEBUG")
                 
-                if isinstance(data, list):
-                    print(f"[DEBUG] data 是列表，长度: {len(data)}")
-                    for idx, item in enumerate(data):
-                        print(f"[DEBUG] 处理第 {idx+1} 个图片项...")
-                        print(f"[DEBUG] 图片项类型: {type(item)}")
-                        print(f"[DEBUG] 图片项内容: {item}")
-                        print(f"[DEBUG] 图片项包含的键: {list(item.keys()) if isinstance(item, dict) else 'N/A'}")
-                        print(f"[DEBUG] 期望的响应格式: {response_format_value}")
+                # 优先处理 Gemini 原生格式: candidates -> content.parts
+                if "candidates" in result:
+                    candidates = result.get("candidates", [])
+                    self.log(f"[DEBUG] 检测到 Gemini 响应格式，candidates 数量: {len(candidates)}", "DEBUG")
+                    
+                    for c_idx, candidate in enumerate(candidates):
+                        content = candidate.get("content", {})
+                        parts = content.get("parts", [])
+                        self.log(f"[DEBUG] 处理第 {c_idx+1} 个 candidate，parts 数量: {len(parts)}", "DEBUG")
                         
-                        tensor = self._process_image_item(item, response_format_value, timeout)
+                        for p_idx, part in enumerate(parts):
+                            self.log(f"[DEBUG] 处理第 {c_idx+1} 个 candidate 的第 {p_idx+1} 个 part，keys: {list(part.keys())}", "DEBUG")
+                            # 1. inlineData / inline_data（优先图片）
+                            inline_data = part.get("inlineData") or part.get("inline_data")
+                            if inline_data:
+                                img_b64 = inline_data.get("data")
+                                if img_b64:
+                                    self.log(f"[DEBUG] 从 inline_data 中提取到图片 Base64，长度: {len(img_b64)}", "DEBUG")
+                                    tensor = base64_to_tensor(img_b64)
+                                    if tensor is not None:
+                                        output_tensors.append(tensor)
+                                        self.log(f"[DEBUG] ✅ 第 {len(output_tensors)} 张图片解码成功（来自响应 {result_idx}）", "DEBUG")
+                                    else:
+                                        self.log("[DEBUG] ❌ 图片 Base64 解码失败", "DEBUG")
+                            # 2. 文本里可能塞了 data:image/base64,...
+                            elif "text" in part:
+                                text_content = part["text"]
+                                self.log(f"[DEBUG] 文本 part 内容: {text_content[:100]}...", "DEBUG")
+                                if "data:image" in text_content and "base64," in text_content:
+                                    try:
+                                        b64_part = text_content.split("base64,")[-1].strip()
+                                        b64_part = b64_part.replace(")", "").replace("]", "")
+                                        tensor = base64_to_tensor(b64_part)
+                                        if tensor is not None:
+                                            output_tensors.append(tensor)
+                                            self.log(f"[DEBUG] ✅ 从文本中提取图片 Base64 并解码成功，当前总数: {len(output_tensors)}", "DEBUG")
+                                    except Exception as e:
+                                        print(f"[WARN] 从文本提取图片 Base64 失败: {e}")
+                # 兼容旧的 OpenAI images/generations 风格: data + b64_json/url
+                elif "data" in result:
+                    data = result["data"]
+                    self.log(f"[DEBUG] data 类型: {type(data)}", "DEBUG")
+                    
+                    if isinstance(data, list):
+                        self.log(f"[DEBUG] data 是列表，长度: {len(data)}", "DEBUG")
+                        for idx, item in enumerate(data):
+                            self.log(f"[DEBUG] 处理第 {idx+1} 个图片项（来自响应 {result_idx}）...", "DEBUG")
+                            self.log(f"[DEBUG] 图片项包含的键: {list(item.keys()) if isinstance(item, dict) else 'N/A'}", "DEBUG")
+                            
+                            tensor = self._process_image_item(item, response_format_value, 超时秒数)
+                            if tensor is not None:
+                                output_tensors.append(tensor)
+                                self.log(f"[DEBUG] ✅ 第 {len(output_tensors)} 张图片转换成功", "DEBUG")
+                            else:
+                                self.log(f"[DEBUG] ❌ 图片转换失败", "DEBUG")
+                                
+                    elif isinstance(data, dict):
+                        self.log(f"[DEBUG] data 是字典", "DEBUG")
+                        self.log(f"[DEBUG] 字典包含的键: {list(data.keys())}", "DEBUG")
+                        
+                        tensor = self._process_image_item(data, response_format_value, 超时秒数)
                         if tensor is not None:
                             output_tensors.append(tensor)
-                            print(f"[DEBUG] ✅ 第 {idx+1} 个图片转换成功")
+                            self.log(f"[DEBUG] ✅ 图片转换成功（来自响应 {result_idx}）", "DEBUG")
                         else:
-                            print(f"[DEBUG] ❌ 第 {idx+1} 个图片转换失败")
-                            
-                elif isinstance(data, dict):
-                    print(f"[DEBUG] data 是字典")
-                    print(f"[DEBUG] 字典包含的键: {list(data.keys())}")
-                    print(f"[DEBUG] 期望的响应格式: {response_format_value}")
-                    
-                    tensor = self._process_image_item(data, response_format_value, timeout)
-                    if tensor is not None:
-                        output_tensors.append(tensor)
-                        print(f"[DEBUG] ✅ 图片转换成功")
-                    else:
-                        print(f"[DEBUG] ❌ 图片转换失败")
-            else:
-                print(f"[ERROR] 响应中没有 'data' 字段！")
-                print(f"[DEBUG] 完整响应内容: {result}")
-                
-                # 检查是否是图像分析API的响应格式
-                if "created" in result and "usage" in result:
-                    print(f"[INFO] 检测到可能是图像分析API的响应，没有图片数据")
-                    print(f"[INFO] 该API可能用于图像分析而非图像生成")
-                
+                            self.log(f"[DEBUG] ❌ 图片转换失败", "DEBUG")
+                else:
+                    print(f"[ERROR] 响应 {result_idx} 中既没有 'candidates' 也没有 'data' 字段！")
+                    self.log(f"[DEBUG] 完整响应内容: {result}", "DEBUG")
+            
             if not output_tensors:
                 print("[ERROR] ❌ 未获取到任何图片数据！")
                 print(f"[DEBUG] 输出 tensors 数量: {len(output_tensors)}")
-                print("[WARN] 返回默认黑色图片")
-                return (torch.zeros((1, 512, 512, 3)),)
+                # 直接抛出异常，不返回默认图片
+                raise RuntimeError("未获取到任何图片数据")
+            
+            # 如果启用"匹配参考尺寸"且有参考图片，则调整输出尺寸
+            if 匹配参考尺寸 and input_images:
+                output_tensors = self._match_reference_size(output_tensors, input_images)
+            
+            # 归一化tensor尺寸(防止尺寸不一致导致stack崩溃)
+            output_tensors = self._normalize_tensor_size(output_tensors)
             
             # 合并所有 tensor
-            batch_tensor = torch.stack(output_tensors, dim=0)
-            print(f"[SUCCESS] 成功生成 {len(output_tensors)} 张图片! 尺寸: {batch_tensor.shape}")
+            batch_tensor = torch.stack(output_tensors, dim=0).contiguous()
+            print(f"\n{'='*60}")
+            print(f"[SUCCESS] ✅ 成功生成 {len(output_tensors)} 张图片!")
+            print(f"[INFO] 批次尺寸: {batch_tensor.shape}")
+            print(f"{'='*60}\n")
             
+            self.log(f"[DEBUG] 准备返回 tensor，确保数据完整性...", "DEBUG")
+            self.log(f"[DEBUG] tensor 类型: {type(batch_tensor)}", "DEBUG")
+            self.log(f"[DEBUG] tensor device: {batch_tensor.device}", "DEBUG")
+            self.log(f"[DEBUG] tensor dtype: {batch_tensor.dtype}", "DEBUG")
+            
+            if self.verbose:
+                print(f"\n{'='*60}")
+                print(f"[OUTPUT] 准备传递给下一个节点的数据详情:")
+                print(f"{'='*60}")
+                print(f"[OUTPUT] 数据类型: {type(batch_tensor).__name__}")
+                print(f"[OUTPUT] 数据形状 (shape): {batch_tensor.shape}")
+                print(f"  ├─ 批次大小 (batch): {batch_tensor.shape[0]}")
+                print(f"  ├─ 图片高度 (height): {batch_tensor.shape[1]}")
+                print(f"  ├─ 图片宽度 (width): {batch_tensor.shape[2]}")
+                print(f"  └─ 通道数 (channels): {batch_tensor.shape[3]}")
+                print(f"[OUTPUT] 数据维度 (ndim): {batch_tensor.ndim}")
+                print(f"[OUTPUT] 元素总数: {batch_tensor.numel():,}")
+                print(f"[OUTPUT] 数据类型 (dtype): {batch_tensor.dtype}")
+                print(f"[OUTPUT] 存储设备 (device): {batch_tensor.device}")
+                print(f"[OUTPUT] 是否需要梯度: {batch_tensor.requires_grad}")
+                print(f"[OUTPUT] 内存大小: {batch_tensor.element_size() * batch_tensor.numel() / 1024 / 1024:.2f} MB")
+                print(f"[OUTPUT] 数值范围: [{batch_tensor.min():.4f}, {batch_tensor.max():.4f}]")
+                print(f"[OUTPUT] 数值均值: {batch_tensor.mean():.4f}")
+                print(f"[OUTPUT] 数值标准差: {batch_tensor.std():.4f}")
+                print(f"\n[OUTPUT] 返回值结构: tuple 包含 1 个元素")
+                print(f"[OUTPUT] 返回值内容: (torch.Tensor,)")
+                print(f"[OUTPUT] ComfyUI 将接收到类型为 'IMAGE' 的输出")
+                print(f"{'='*60}\n")
+            
+            print(f"[INFO] ✅ 节点执行完毕，返回结果")
             return (batch_tensor,)
             
         except InterruptedError as e:
@@ -527,22 +763,118 @@ class NanoBananaNode:
             raise e
             
         except Exception as e:
-            # 关键:异常时直接抛出,不返回默认图片,避免缓存错误结果
+            # 所有异常统一处理
             print(f"[ERROR] 生成失败: {e}")
             print(f"[DEBUG] 异常类型: {type(e).__name__}")
             import traceback
             traceback.print_exc()
-                    
-            # 直接抛出异常,让ComfyUI知道节点失败了
-            raise e
+            raise
     
     def _process_image_item(self, item: dict, format_type: str, timeout: int):
         """处理单个图片数据项"""
+        self.log(f"[DEBUG] _process_image_item 调用: format_type={format_type}", "DEBUG")
+        self.log(f"[DEBUG] item 内容: {item}", "DEBUG")
+        
         if format_type == "url" and "url" in item:
+            self.log(f"[DEBUG] 匹配到 URL 格式，开始下载...", "DEBUG")
             return download_image_to_tensor(item["url"], timeout)
         elif format_type == "b64_json" and "b64_json" in item:
+            self.log(f"[DEBUG] 匹配到 Base64 格式，开始解码...", "DEBUG")
             return base64_to_tensor(item["b64_json"])
-        return None
+        else:
+            print(f"[ERROR] 未匹配到任何格式！")
+            self.log(f"[DEBUG] 期望格式: {format_type}", "DEBUG")
+            self.log(f"[DEBUG] item 包含的键: {list(item.keys()) if isinstance(item, dict) else 'N/A'}", "DEBUG")
+            return None
+    
+    def _normalize_tensor_size(self, tensors):
+        """归一化tensor尺寸,避免尺寸不一致导致stack崩溃"""
+        if not tensors:
+            return tensors
+        
+        # 获取所有tensor的尺寸
+        shapes = [(t.shape[0], t.shape[1]) for t in tensors]
+        heights = [s[0] for s in shapes]
+        widths = [s[1] for s in shapes]
+        
+        # 检查是否所有尺寸都一致
+        if len(set(shapes)) == 1:
+            self.log(f"[DEBUG] 所有图片尺寸一致: {shapes[0]}", "DEBUG")
+            return tensors
+        
+        # 尺寸不一致,需要归一化
+        print(f"[WARN] ⚠️ 检测到图片尺寸不一致!")
+        print(f"[WARN] 尺寸分布: {set(shapes)}")
+        
+        # 使用最小公共尺寸(裁剪策略)
+        min_h = min(heights)
+        min_w = min(widths)
+        
+        print(f"[INFO] 统一裁剪到最小公共尺寸: {min_h}×{min_w}")
+        
+        # 中心裁剪
+        normalized = []
+        for idx, t in enumerate(tensors):
+            h, w, c = t.shape
+            
+            # 计算裁剪起始位置(中心对齐)
+            start_h = (h - min_h) // 2
+            start_w = (w - min_w) // 2
+            
+            # 裁剪
+            cropped = t[start_h:start_h+min_h, start_w:start_w+min_w, :]
+            normalized.append(cropped)
+            
+            if h != min_h or w != min_w:
+                self.log(f"[DEBUG] 图片{idx+1}: {h}×{w} → {min_h}×{min_w} (裁剪)", "DEBUG")
+        
+        print(f"[SUCCESS] ✅ 已归一化 {len(normalized)} 张图片尺寸")
+        return normalized
+    
+    def _match_reference_size(self, output_tensors, input_images):
+        """匹配参考图片尺寸 - 使用第一张参考图的尺寸作为目标"""
+        if not output_tensors or not input_images:
+            return output_tensors
+        
+        # 获取第一张参考图的尺寸 (tensor shape: [H, W, C])
+        ref_tensor = input_images[0]
+        if len(ref_tensor.shape) > 3:
+            ref_tensor = ref_tensor[0]  # 如果是批次，取第一张
+        
+        target_h = ref_tensor.shape[0]
+        target_w = ref_tensor.shape[1]
+        
+        print(f"\n{'='*60}")
+        print(f"[INFO] 启用匹配参考尺寸功能")
+        print(f"[INFO] 参考图尺寸: {target_w}×{target_h}")
+        print(f"[INFO] 待处理图片数量: {len(output_tensors)}")
+        print(f"{'='*60}\n")
+        
+        matched_tensors = []
+        for idx, tensor in enumerate(output_tensors):
+            current_h, current_w = tensor.shape[0], tensor.shape[1]
+            
+            if current_h == target_h and current_w == target_w:
+                self.log(f"[DEBUG] 图片{idx+1} 尺寸已匹配，跳过调整", "DEBUG")
+                matched_tensors.append(tensor)
+            else:
+                print(f"[INFO] 图片{idx+1}: {current_w}×{current_h} → {target_w}×{target_h} (缩放+裁剪)")
+                
+                # 转换为 PIL Image
+                array = (tensor.cpu().numpy() * 255.0).astype(np.uint8)
+                pil_image = Image.fromarray(array, mode='RGB')
+                
+                # 使用 ImageOps.fit 进行智能缩放+居中裁剪
+                resized_image = ImageOps.fit(pil_image, (target_w, target_h), method=Image.LANCZOS)
+                
+                # 转回 tensor
+                resized_array = np.array(resized_image).astype(np.float32) / 255.0
+                resized_tensor = torch.from_numpy(resized_array)
+                
+                matched_tensors.append(resized_tensor)
+        
+        print(f"[SUCCESS] ✅ 已将 {len(matched_tensors)} 张图片调整为参考尺寸 {target_w}×{target_h}\n")
+        return matched_tensors
 
 
 # ComfyUI 节点映射

@@ -12,6 +12,8 @@ import ssl
 from urllib.parse import urlparse
 import configparser
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # 加载配置文件
 CATEGORY = "artsmcp"
@@ -88,26 +90,45 @@ class DoubaoSeedreamNode:
                     "description": "最大生成图片数量，0=禁用组图生成，1-10=生成对应数量的图片",
                     "label": "最大图片数量"
                 }),
+                "并发请求数": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 10,
+                    "description": "并发请求的数量，1=单次请求，2-10=并发多次请求",
+                    "label": "并发请求数"
+                }),
+                "响应格式": (["url", "b64_json"], {
+                    "default": "url",
+                    "label": "响应格式"
+                }),
+                "超时秒数": ("INT", {
+                    "default": 120,
+                    "min": 30,
+                    "max": 600,
+                    "description": "API请求超时时间（秒），范围：30-600秒",
+                    "label": "超时秒数"
+                }),
+                "最大重试次数": ("INT", {
+                    "default": 3,
+                    "min": 0,
+                    "max": 10,
+                    "description": "API请求失败时的最大重试次数,0=不重试,1-10=重试对应次数",
+                    "label": "最大重试次数"
+                }),
+                "启用分行提示词": ("BOOLEAN", {
+                    "default": False,
+                    "description": "启用后,将提示词按行分割,每行作为独立提示词进行请求。配合并发请求数可实现:N行提示词×M并发=N×M张图片",
+                    "label": "启用分行提示词"
+                }),
                 "水印": ("BOOLEAN", {
                     "default": False,
                     "description": "是否在生成的图片上添加水印",
                     "label": "水印"
                 }),
-                "返回格式": (["url", "b64_json"], {
-                    "default": "url",
-                    "label": "返回格式"
-                }),
-                "请求超时": ("INT", {
-                    "default": 120,
-                    "min": 30,
-                    "max": 600,
-                    "description": "API请求超时时间（秒），范围：30-600秒",
-                    "label": "请求超时"
-                }),
-                "调试模式": ("BOOLEAN", {
+                "详细日志": ("BOOLEAN", {
                     "default": False,
-                    "description": "调试模式：输出完整的API请求和响应信息",
-                    "label": "调试模式"
+                    "description": "详细日志：输出完整的API请求和响应信息",
+                    "label": "详细日志"
                 })
             }
         }
@@ -174,15 +195,19 @@ class DoubaoSeedreamNode:
             print(f"Error downloading/converting image from URL: {e}")
             return None
     
-    def call_api(self, host, path, payload, headers, timeout, max_retries=3):
+    def call_api(self, host, path, payload, headers, timeout, max_retries, request_id=None):
         """
         使用http.client调用API,支持指数退避重试机制
         """
         last_error = None
+        prefix = f"[请求 {request_id}] " if request_id else ""
         
-        for attempt in range(1, max_retries + 1):
+        # 如果max_retries为0,至少执行1次请求
+        total_attempts = max(1, max_retries + 1)
+        
+        for attempt in range(1, total_attempts + 1):
             try:
-                print(f"[尝试 {attempt}/{max_retries}] 正在调用API...")
+                print(f"{prefix}[尝试 {attempt}/{max_retries}] 正在调用API...")
                 
                 context = ssl.create_default_context()
                 context.check_hostname = False
@@ -197,18 +222,18 @@ class DoubaoSeedreamNode:
                 
                 # 成功返回
                 if res.status == 200:
-                    print(f"[成功] API调用成功")
+                    print(f"{prefix}[成功] API调用成功")
                     return res.status, data.decode("utf-8")
                 
                 # 服务端错误(5xx)可重试
                 elif res.status >= 500:
                     error_msg = data.decode("utf-8")
-                    print(f"[警告] 服务器错误 {res.status}: {error_msg[:100]}")
+                    print(f"{prefix}[警告] 服务器错误 {res.status}: {error_msg[:100]}")
                     last_error = (res.status, error_msg)
                     
-                    if attempt < max_retries:
+                    if attempt < total_attempts:
                         wait_time = min(2 ** (attempt - 1), 30)  # 指数退避,最多30秒
-                        print(f"[重试] 等待 {wait_time} 秒后重试...")
+                        print(f"{prefix}[重试] 等待 {wait_time} 秒后重试...")
                         time.sleep(wait_time)
                         continue
                 else:
@@ -216,27 +241,28 @@ class DoubaoSeedreamNode:
                     return res.status, data.decode("utf-8")
                     
             except socket.timeout as e:
-                print(f"[超时] 请求超时: {e}")
+                print(f"{prefix}[超时] 请求超时: {e}")
                 last_error = (None, f"Timeout: {e}")
                 
-                if attempt < max_retries:
+                if attempt < total_attempts:
                     wait_time = min(2 ** (attempt - 1), 30)
-                    print(f"[重试] 等待 {wait_time} 秒后重试...")
+                    print(f"{prefix}[重试] 等待 {wait_time} 秒后重试...")
                     time.sleep(wait_time)
                     continue
                     
             except Exception as e:
-                print(f"[错误] HTTP client error: {e}")
+                print(f"{prefix}[错误] HTTP client error: {e}")
                 last_error = (None, str(e))
                 
-                if attempt < max_retries:
+                if attempt < total_attempts:
                     wait_time = min(2 ** (attempt - 1), 30)
-                    print(f"[重试] 等待 {wait_time} 秒后重试...")
+                    print(f"{prefix}[重试] 等待 {wait_time} 秒后重试...")
                     time.sleep(wait_time)
                     continue
         
         # 所有重试都失败
-        print(f"[失败] API调用失败,已重试 {max_retries} 次")
+        retry_msg = f"已重试 {max_retries} 次" if max_retries > 0 else "未启用重试"
+        print(f"{prefix}[失败] API调用失败,{retry_msg}")
         if last_error:
             return last_error
         return None, "All retries failed"
@@ -301,8 +327,107 @@ class DoubaoSeedreamNode:
         
         return True, ""
     
+    def parse_multiline_prompts(self, prompt_text, enable_multiline):
+        """
+        解析提示词,支持分行模式
+        返回: [prompt1, prompt2, ...]
+        """
+        if not enable_multiline:
+            # 单提示词模式,返回原始文本
+            return [prompt_text.strip()] if prompt_text.strip() else []
+        
+        # 分行模式,按行分割并过滤空行
+        lines = [line.strip() for line in prompt_text.split('\n')]
+        valid_prompts = [line for line in lines if line]
+        
+        return valid_prompts
+    
+    def call_api_concurrent(self, host, path, payload, headers, timeout, 并发数, 最大重试次数, 调试模式=False):
+        """
+        并发调用API,等待所有请求完成或超时
+        返回: [(status_code, response_text), ...]
+        """
+        print(f"\n{'='*60}")
+        print(f"🚀 [并发模式] 启动 {并发数} 个并发请求")
+        print(f"  - 最大重试次数: {最大重试次数}")
+        print(f"{'='*60}\n")
+        
+        results = []
+        lock = threading.Lock()
+        
+        def single_request(request_id):
+            """单个请求的包装函数"""
+            try:
+                start_time = time.time()
+                status_code, response_text = self.call_api(
+                    host, path, payload, headers, timeout, 
+                    max_retries=最大重试次数, request_id=request_id
+                )
+                elapsed = time.time() - start_time
+                
+                with lock:
+                    print(f"✅ [请求 {request_id}] 完成，耗时: {elapsed:.2f}秒")
+                
+                return {
+                    'request_id': request_id,
+                    'status_code': status_code,
+                    'response_text': response_text,
+                    'elapsed_time': elapsed,
+                    'success': status_code == 200
+                }
+            except Exception as e:
+                with lock:
+                    print(f"❌ [请求 {request_id}] 异常: {e}")
+                return {
+                    'request_id': request_id,
+                    'status_code': None,
+                    'response_text': str(e),
+                    'elapsed_time': 0,
+                    'success': False
+                }
+        
+        # 使用线程池并发执行
+        with ThreadPoolExecutor(max_workers=并发数) as executor:
+            # 提交所有任务
+            futures = {executor.submit(single_request, i+1): i+1 for i in range(并发数)}
+            
+            # 等待所有任务完成
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+        
+        # 统计结果
+        success_count = sum(1 for r in results if r['success'])
+        failed_count = 并发数 - success_count
+        total_time = max([r['elapsed_time'] for r in results]) if results else 0
+        avg_time = sum([r['elapsed_time'] for r in results]) / len(results) if results else 0
+        
+        print(f"\n{'='*60}")
+        print(f"📊 [并发统计]")
+        print(f"  - 总请求数: {并发数}")
+        print(f"  - 成功: {success_count} | 失败: {failed_count}")
+        print(f"  - 总耗时: {total_time:.2f}秒")
+        print(f"  - 平均耗时: {avg_time:.2f}秒")
+        print(f"{'='*60}\n")
+        
+        # 调试模式输出详细信息
+        if 调试模式:
+            print(f"\n{'='*60}")
+            print(f"🐛 DEBUG: 并发请求详细结果")
+            print(f"{'='*60}")
+            for result in sorted(results, key=lambda x: x['request_id']):
+                print(f"\n[请求 {result['request_id']}]")
+                print(f"  状态: {'✅ 成功' if result['success'] else '❌ 失败'}")
+                print(f"  状态码: {result['status_code']}")
+                print(f"  耗时: {result['elapsed_time']:.2f}秒")
+                if not result['success']:
+                    print(f"  错误: {result['response_text'][:200]}")
+            print(f"{'='*60}\n")
+        
+        return results
+    
     def generate_image(self, 提示词, API密钥, API地址, 模型, 宽度, 高度, 输入图片1=None, 输入图片2=None,
-                      最大图片数量=0, 水印=False, 返回格式="url", 请求超时=120, 调试模式=False):
+                      最大图片数量=0, 并发请求数=1, 响应格式="url", 超时秒数=120, 最大重试次数=3, 启用分行提示词=False, 水印=False, 详细日志=False):
         """
         生成图片的主函数
         """
@@ -338,58 +463,30 @@ class DoubaoSeedreamNode:
             with CONFIG_PATH.open("w", encoding="utf-8") as fp:
                 config_writer.write(fp)
             
-            # 根据max_images自动判断sequential_image_generation
-            if 最大图片数量 > 0:
-                sequential_image_generation = "auto"
+            # 解析提示词(支持分行模式)
+            prompts = self.parse_multiline_prompts(提示词, 启用分行提示词)
+            
+            if not prompts:
+                print("[ERROR] 提示词为空,无法生成图片")
+                default_tensor = torch.zeros((1, 512, 512, 3))
+                return (default_tensor,)
+            
+            # 打印提示词信息
+            print(f"\n{'='*60}")
+            print(f"📝 [提示词解析]")
+            print(f"  - 分行模式: {启用分行提示词}")
+            print(f"  - 提示词数量: {len(prompts)}")
+            if 启用分行提示词 and len(prompts) > 1:
+                print(f"  - 提示词列表:")
+                for idx, p in enumerate(prompts, 1):
+                    preview = p[:50] + '...' if len(p) > 50 else p
+                    print(f"    [{idx}] {preview}")
             else:
-                sequential_image_generation = "disabled"
-            
-            # 准备请求数据
-            # 将宽高转换为API要求的格式
-            size_string = f"{宽度}x{高度}"
-            
-            request_data = {
-                "model": 模型,
-                "prompt": 提示词,
-                "size": size_string,
-                "sequential_image_generation": sequential_image_generation,
-                "stream": False,
-                "response_format": 返回格式,
-                "watermark": 水印
-            }
-            
-            # 处理图像输入
-            images = []
-            if 输入图片1 is not None:
-                img_url = self.tensor_to_image_url(输入图片1)
-                if img_url:
-                    images.append(img_url)
-            
-            if 输入图片2 is not None:
-                img_url = self.tensor_to_image_url(输入图片2)
-                if img_url:
-                    images.append(img_url)
-            
-            # 根据图像数量决定API参数
-            if len(images) == 1:
-                # 单图：图生图
-                request_data["image"] = images[0]
-            elif len(images) > 1:
-                # 多图：图生组图或多图融合
-                request_data["image"] = images
-            
-            # 如果启用了组图生成，添加配置
-            if sequential_image_generation == "auto" and 最大图片数量 > 0:
-                request_data["sequential_image_generation_options"] = {
-                    "max_images": 最大图片数量
-                }
-            
-            payload = json.dumps(request_data)
-            
-            headers = {
-                'Authorization': f'Bearer {API密钥}',
-                'Content-Type': 'application/json'
-            }
+                preview = prompts[0][:50] + '...' if len(prompts[0]) > 50 else prompts[0]
+                print(f"  - 提示词: {preview}")
+            print(f"  - 总请求数: {len(prompts) * 并发请求数} (提示词×并发)")
+            print(f"  - 预计生成图片数: {len(prompts) * 并发请求数}")
+            print(f"{'='*60}\n")
             
             # 解析base_url
             if API地址.startswith('http://') or API地址.startswith('https://'):
@@ -400,42 +497,219 @@ class DoubaoSeedreamNode:
                 host = API地址
                 path = "/v1/images/generations"
             
+            # 准备所有请求的payload
+            all_payloads = []
+            
+            for prompt_idx, single_prompt in enumerate(prompts, 1):
+                # 根据max_images自动判断sequential_image_generation
+                if 最大图片数量 > 0:
+                    sequential_image_generation = "auto"
+                else:
+                    sequential_image_generation = "disabled"
+                            
+                # 准备请求数据
+                # 将宽高转换为API要求的格式
+                size_string = f"{宽度}x{高度}"
+                            
+                request_data = {
+                    "model": 模型,
+                    "prompt": single_prompt,
+                    "size": size_string,
+                    "sequential_image_generation": sequential_image_generation,
+                    "stream": False,
+                    "response_format": 响应格式,
+                    "watermark": 水印
+                }
+                            
+                # 处理图像输入
+                images = []
+                if 输入图片1 is not None:
+                    img_url = self.tensor_to_image_url(输入图片1)
+                    if img_url:
+                        images.append(img_url)
+                            
+                if 输入图片2 is not None:
+                    img_url = self.tensor_to_image_url(输入图片2)
+                    if img_url:
+                        images.append(img_url)
+                            
+                # 根据图像数量决定API参数
+                if len(images) == 1:
+                    # 单图:图生图
+                    request_data["image"] = images[0]
+                elif len(images) > 1:
+                    # 多图:图生组图或多图融合
+                    request_data["image"] = images
+                            
+                # 如果启用了组图生成,添加配置
+                if sequential_image_generation == "auto" and 最大图片数量 > 0:
+                    request_data["sequential_image_generation_options"] = {
+                        "max_images": 最大图片数量
+                    }
+                            
+                payload = json.dumps(request_data)
+                            
+                # 为每个提示词生成指定数量的并发请求
+                for concurrent_idx in range(并发请求数):
+                    all_payloads.append({
+                        'payload': payload,
+                        'prompt_id': prompt_idx,
+                        'concurrent_id': concurrent_idx + 1,
+                        'prompt_text': single_prompt
+                    })
+                        
+            headers = {
+                'Authorization': f'Bearer {API密钥}',
+                'Content-Type': 'application/json'
+            }
+            
             print(f"\n{'='*60}")
             print(f"[Doubao-Seedream] 调用API")
             print(f"  - 地址: {host}{path}")
             print(f"  - 模型: {模型}")
             print(f"  - 分辨率: {宽度}x{高度} (总像素: {宽度*高度:,}, 宽高比: {宽度/高度:.2f})")
-            print(f"  - 提示词: {提示词[:50]}...")
-            print(f"  - 模式: {'文生图' if not images else ('图生图' if len(images) == 1 else '多图融合/组图')}")
+            if 输入图片1 is not None or 输入图片2 is not None:
+                images_count = sum([1 for img in [输入图片1, 输入图片2] if img is not None])
+                print(f"  - 模式: {'图生图' if images_count == 1 else '多图融合/组图'}")
+            else:
+                print(f"  - 模式: 文生图")
             print(f"  - 组图生成: {'启用('+str(最大图片数量)+'张)' if 最大图片数量 > 0 else '禁用'}")
+            print(f"  - 分行提示词: {启用分行提示词}")
+            print(f"  - 提示词数: {len(prompts)}")
+            print(f"  - 每提示词并发数: {并发请求数}")
+            print(f"  - 总请求数: {len(all_payloads)}")
+            print(f"  - 最大重试次数: {最大重试次数}")
             print(f"  - 水印: {水印}")
-            print(f"  - 返回格式: {返回格式}")
+            print(f"  - 响应格式: {响应格式}")
             print(f"={'='*60}\n")
             
-            # Debug 模式：输出请求数据
-            if 调试模式:
+            # Debug 模式:输出请求数据
+            if 详细日志:
                 print(f"\n{'='*60}")
-                print(f"🐛 DEBUG: Request Data")
+                print(f"🐛 DEBUG: Request Data Summary")
                 print(f"{'='*60}")
-                # 创建一个用于显示的请求数据副本（不包含base64图片）
-                debug_request = request_data.copy()
-                if 'image' in debug_request:
-                    if isinstance(debug_request['image'], list):
-                        debug_request['image'] = [f"<base64_image_{i+1}>" for i in range(len(debug_request['image']))]
-                    else:
-                        debug_request['image'] = "<base64_image>"
-                print(json.dumps(debug_request, indent=2, ensure_ascii=False))
+                print(f"总请求数: {len(all_payloads)}")
+                for payload_info in all_payloads[:3]:  # 只显示前3个请求
+                    debug_request = json.loads(payload_info['payload'])
+                    if 'image' in debug_request:
+                        if isinstance(debug_request['image'], list):
+                            debug_request['image'] = [f"<base64_image_{i+1}>" for i in range(len(debug_request['image']))]
+                        else:
+                            debug_request['image'] = "<base64_image>"
+                    print(f"\n[提示词 {payload_info['prompt_id']}-并发 {payload_info['concurrent_id']}]")
+                    print(json.dumps(debug_request, indent=2, ensure_ascii=False))
+                if len(all_payloads) > 3:
+                    print(f"\n... 还有 {len(all_payloads)-3} 个请求(已省略)")
                 print(f"{'='*60}\n")
+                        
+            # 批量并发调用API
+            print(f"\n{'='*60}")
+            print(f"🚀 [批量并发模式] 启动 {len(all_payloads)} 个请求")
+            print(f"  - 提示词数量: {len(prompts)}")
+            print(f"  - 每提示词并发数: {并发请求数}")
+            print(f"  - 最大重试次数: {最大重试次数}")
+            print(f"{'='*60}\n")
+                        
+            all_responses = []
+            lock = threading.Lock()
+                        
+            def single_request(payload_info, request_id):
+                """单个请求的包装函数"""
+                try:
+                    start_time = time.time()
+                    prefix = f"[提示词{payload_info['prompt_id']}-并发{payload_info['concurrent_id']}]"
+                    print(f"{prefix} 开始请求...")
+                                
+                    status_code, response_text = self.call_api(
+                        host, path, payload_info['payload'], headers, 超时秒数,
+                        max_retries=最大重试次数, request_id=request_id
+                    )
+                    elapsed = time.time() - start_time
+                                
+                    with lock:
+                        if status_code == 200:
+                            print(f"✅ {prefix} 完成,耗时: {elapsed:.2f}秒")
+                        else:
+                            print(f"❌ {prefix} 失败,状态码: {status_code}")
+                                
+                    return {
+                        'request_id': request_id,
+                        'prompt_id': payload_info['prompt_id'],
+                        'concurrent_id': payload_info['concurrent_id'],
+                        'status_code': status_code,
+                        'response_text': response_text,
+                        'elapsed_time': elapsed,
+                        'success': status_code == 200,
+                        'prompt_text': payload_info['prompt_text']
+                    }
+                except Exception as e:
+                    with lock:
+                        print(f"❌ [请求 {request_id}] 异常: {e}")
+                    return {
+                        'request_id': request_id,
+                        'prompt_id': payload_info.get('prompt_id', 0),
+                        'concurrent_id': payload_info.get('concurrent_id', 0),
+                        'status_code': None,
+                        'response_text': str(e),
+                        'elapsed_time': 0,
+                        'success': False,
+                        'prompt_text': payload_info.get('prompt_text', '')
+                    }
+                        
+            # 使用线程池并发执行所有请求
+            max_workers = min(len(all_payloads), 10)  # 最多10个并发线程
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(single_request, payload_info, i+1): i 
+                          for i, payload_info in enumerate(all_payloads)}
+                            
+                for future in as_completed(futures):
+                    result = future.result()
+                    all_responses.append(result)
+                        
+            # 统计结果
+            success_count = sum(1 for r in all_responses if r['success'])
+            failed_count = len(all_responses) - success_count
+            total_time = max([r['elapsed_time'] for r in all_responses]) if all_responses else 0
+            avg_time = sum([r['elapsed_time'] for r in all_responses]) / len(all_responses) if all_responses else 0
+                        
+            print(f"\n{'='*60}")
+            print(f"📊 [批量请求统计]")
+            print(f"  - 总请求数: {len(all_responses)}")
+            print(f"  - 成功: {success_count} | 失败: {failed_count}")
+            print(f"  - 总耗时: {total_time:.2f}秒")
+            print(f"  - 平均耗时: {avg_time:.2f}秒")
+                        
+            # 按提示词分组统计
+            if 启用分行提示词 and len(prompts) > 1:
+                print(f"\n  按提示词统计:")
+                for prompt_id in range(1, len(prompts) + 1):
+                    prompt_results = [r for r in all_responses if r['prompt_id'] == prompt_id]
+                    prompt_success = sum(1 for r in prompt_results if r['success'])
+                    print(f"    [提示词{prompt_id}] 成功: {prompt_success}/{len(prompt_results)}")
+                        
+            print(f"{'='*60}\n")
+                        
+            # 收集所有成功的响应
+            successful_responses = [r['response_text'] for r in all_responses if r['success']]
+                        
+            if not successful_responses:
+                print(f"\n[ERROR] 所有请求都失败了")
+                if 输入图片1 is not None:
+                    return (输入图片1,)
+                else:
+                    default_tensor = torch.zeros((1, 512, 512, 3))
+                    return (default_tensor,)
             
-            # 调用API
-            status_code, response_text = self.call_api(host, path, payload, headers, 请求超时)
+            # 处理所有响应,提取图片URL和base64数据
+            all_image_urls = []
+            all_base64_images = []
             
-            if status_code == 200:
+            for idx, response_text in enumerate(successful_responses):
                 try:
                     result = json.loads(response_text)
                     
                     # Debug 模式：输出完整响应
-                    if 调试模式:
+                    if 详细日志 and 并发请求数 <= 1:
                         print(f"\n{'='*60}")
                         print(f"🐛 DEBUG: Full API Response")
                         print(f"{'='*60}")
@@ -452,99 +726,119 @@ class DoubaoSeedreamNode:
                         print(json.dumps(debug_result, indent=2, ensure_ascii=False))
                         print(f"{'='*60}\n")
                     
-                    # 提取图像URL和base64数据
-                    image_urls = []
-                    base64_images = []
-                    
                     # 处理不同的响应格式
                     if 'data' in result:
                         data = result['data']
                         if isinstance(data, list):
                             for item in data:
-                                if 返回格式 == "url":
+                                if 响应格式 == "url":
                                     url = item.get('url')
                                     if url:
-                                        image_urls.append(url)
-                                elif 返回格式 == "b64_json":
+                                        all_image_urls.append(url)
+                                elif 响应格式 == "b64_json":
                                     b64_data = item.get('b64_json')
                                     if b64_data:
-                                        base64_images.append(b64_data)
+                                        all_base64_images.append(b64_data)
                         elif isinstance(data, dict):
-                            if 返回格式 == "url":
+                            if 响应格式 == "url":
                                 url = data.get('url')
                                 if url:
-                                    image_urls.append(url)
-                            elif 返回格式 == "b64_json":
+                                    all_image_urls.append(url)
+                            elif 响应格式 == "b64_json":
                                 b64_data = data.get('b64_json')
                                 if b64_data:
-                                    base64_images.append(b64_data)
+                                    all_base64_images.append(b64_data)
                     elif 'url' in result:
-                        image_urls.append(result['url'])
-                    
-                    # 处理base64格式的图像
-                    if base64_images:
-                        print(f"\n[INFO] 找到 {len(base64_images)} 张 base64 格式图片")
-                        output_tensors = []
-                        for b64_data in base64_images:
-                            try:
-                                # 解码base64图像
-                                img_bytes = base64.b64decode(b64_data)
-                                pil_image = Image.open(io.BytesIO(img_bytes))
-                                pil_image = pil_image.convert('RGB')
-                                numpy_image = np.array(pil_image).astype(np.float32) / 255.0
-                                tensor = torch.from_numpy(numpy_image).unsqueeze(0)
-                                output_tensors.append(tensor)
-                            except Exception as e:
-                                print(f"Error processing base64 image: {e}")
+                        all_image_urls.append(result['url'])
                         
-                        if output_tensors:
-                            # 将所有tensor合并成一个批次
-                            batch_tensor = torch.cat(output_tensors, dim=0)
-                            print(f"\n{'='*60}")
-                            print(f"[SUCCESS] ✅ 成功生成 {len(output_tensors)} 张图片!")
-                            print(f"[INFO] 批次尺寸: {batch_tensor.shape}")
-                            print(f"{'='*60}\n")
-                            return (batch_tensor,)
-                    
-                    # 处理URL格式的图像
-                    if image_urls:
-                        print(f"\n[INFO] 找到 {len(image_urls)} 张图片URL")
-                        
-                        # 下载所有图像并转换为tensor
-                        output_tensors = []
-                        for url in image_urls:
-                            output_tensor = self.url_to_tensor(url)
-                            if output_tensor is not None:
-                                output_tensors.append(output_tensor)
-                        
-                        if output_tensors:
-                            # 将所有tensor合并成一个批次
-                            # 每个tensor的形状是 (1, height, width, 3)
-                            # 使用torch.cat在batch维度（dim=0）上合并
-                            batch_tensor = torch.cat(output_tensors, dim=0)
-                            print(f"\n{'='*60}")
-                            print(f"[SUCCESS] ✅ 成功生成 {len(output_tensors)} 张图片!")
-                            print(f"[INFO] 批次尺寸: {batch_tensor.shape}")
-                            print(f"{'='*60}\n")
-                            return (batch_tensor,)
-                        
-                        print("[ERROR] 下载所有图片失败")
-                    else:
-                        print("[ERROR] API响应中未找到图片URL")
-                        if 调试模式:
-                            print(f"[DEBUG] 响应内容: {response_text[:1000]}")
-                    
                 except json.JSONDecodeError as e:
-                    print(f"Failed to parse JSON response: {e}")
-                    print("Raw response:", response_text[:500])
+                    print(f"[警告] 响应 {idx+1} JSON解析失败: {e}")
+                    print(f"Raw response: {response_text[:500]}")
+                    continue
+                    
+            # 处理base64格式的图像
+            if all_base64_images:
+                print(f"\n{'='*60}")
+                print(f"📥 [下载] 开始处理 {len(all_base64_images)} 张 base64 格式图片")
+                print(f"{'='*60}\n")
+                
+                output_tensors = []
+                for idx, b64_data in enumerate(all_base64_images, 1):
+                    try:
+                        print(f"[处理] base64图片 {idx}/{len(all_base64_images)}...")
+                        # 解码base64图像
+                        img_bytes = base64.b64decode(b64_data)
+                        pil_image = Image.open(io.BytesIO(img_bytes))
+                        pil_image = pil_image.convert('RGB')
+                        numpy_image = np.array(pil_image).astype(np.float32) / 255.0
+                        tensor = torch.from_numpy(numpy_image).unsqueeze(0)
+                        output_tensors.append(tensor)
+                        print(f"✅ [完成] base64图片 {idx}")
+                    except Exception as e:
+                        print(f"❌ [错误] 处理base64图片 {idx} 失败: {e}")
+                
+                if output_tensors:
+                    # 将所有tensor合并成一个批次
+                    batch_tensor = torch.cat(output_tensors, dim=0)
+                    print(f"\n{'='*60}")
+                    print(f"[SUCCESS] ✅ 成功生成 {len(output_tensors)} 张图片!")
+                    print(f"[INFO] 批次尺寸: {batch_tensor.shape}")
+                    if 并发请求数 > 1:
+                        print(f"[INFO] 并发请求数: {并发请求数}")
+                    print(f"{'='*60}\n")
+                    return (batch_tensor,)
+            
+            # 处理URL格式的图像
+            if all_image_urls:
+                print(f"\n{'='*60}")
+                print(f"📥 [下载] 开始下载 {len(all_image_urls)} 张图片")
+                print(f"{'='*60}\n")
+                
+                # 使用线程池并发下载图片
+                output_tensors = []
+                
+                def download_image(url, idx):
+                    try:
+                        print(f"[下载] 图片 {idx}/{len(all_image_urls)} - {url[:80]}...")
+                        tensor = self.url_to_tensor(url)
+                        if tensor is not None:
+                            print(f"✅ [完成] 图片 {idx}")
+                            return (idx, tensor)
+                        else:
+                            print(f"❌ [失败] 图片 {idx}")
+                            return (idx, None)
+                    except Exception as e:
+                        print(f"❌ [错误] 图片 {idx} 下载异常: {e}")
+                        return (idx, None)
+                
+                # 并发下载
+                download_workers = min(len(all_image_urls), 5)  # 最多5个并发下载
+                with ThreadPoolExecutor(max_workers=download_workers) as executor:
+                    futures = {executor.submit(download_image, url, i+1): i for i, url in enumerate(all_image_urls)}
+                    
+                    results = [None] * len(all_image_urls)
+                    for future in as_completed(futures):
+                        idx, tensor = future.result()
+                        if tensor is not None:
+                            results[idx-1] = tensor
+                
+                # 过滤掉失败的下载
+                output_tensors = [t for t in results if t is not None]
+                
+                if output_tensors:
+                    # 将所有tensor合并成一个批次
+                    batch_tensor = torch.cat(output_tensors, dim=0)
+                    print(f"\n{'='*60}")
+                    print(f"[SUCCESS] ✅ 成功生成 {len(output_tensors)}/{len(all_image_urls)} 张图片!")
+                    print(f"[INFO] 批次尺寸: {batch_tensor.shape}")
+                    if 并发请求数 > 1:
+                        print(f"[INFO] 并发请求数: {并发请求数}")
+                    print(f"{'='*60}\n")
+                    return (batch_tensor,)
+                
+                print("[ERROR] 下载所有图片失败")
             else:
-                print(f"\n[ERROR] API调用失败，状态码: {status_code}")
-                print(f"[ERROR] 错误响应: {response_text[:500]}")
-                print(f"\n💡 可能的解决方案:")
-                print(f"   1. 检查 API Key 是否有效")
-                print(f"   2. 确认 API 服务地址是否正确")
-                print(f"   3. 查看错误信息，调整参数")
-                print(f"   4. 检查网络连接是否正常")
+                print("[ERROR] API响应中未找到图片URL或base64数据")
             
             # 如果失败，返回默认图像或原始输入
             if 输入图片1 is not None:

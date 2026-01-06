@@ -293,7 +293,7 @@ class GeminiBananaNode:
                 "响应格式": (list(RESPONSE_FORMAT_MAP.keys()), {
                     "default": "URL"
                 }),
-                "超时时间秒": ("INT", {
+                "超时秒数": ("INT", {
                     "default": 120,
                     "min": 30,
                     "max": 600,
@@ -305,22 +305,22 @@ class GeminiBananaNode:
                     "max": 10,
                     "step": 1
                 }),
-                "启用分行提示词": ("BOOLEAN", {
-                    "default": False
-                }),
-                "每行并发请求数": ("INT", {
+                "并发请求数": ("INT", {
                     "default": 1,
                     "min": 1,
                     "max": 10,
                     "step": 1
                 }),
-                "详细日志": ("BOOLEAN", {
+                "启用分行提示词": ("BOOLEAN", {
                     "default": False
                 }),
                 "匹配参考尺寸": ("BOOLEAN", {
-                    "default": True,
+                    "default": False,
                     "label_on": "开启",
                     "label_off": "关闭"
+                }),
+                "详细日志": ("BOOLEAN", {
+                    "default": False
                 }),
             },
             "optional": {
@@ -702,9 +702,9 @@ class GeminiBananaNode:
         
         return batch_tensor
     
-    def generate_image(self, 提示词, 启用分行提示词, 每行并发请求数, 详细日志, 匹配参考尺寸,
-                       API密钥, API地址, 模型, 宽高比, 
-                       响应格式, 超时时间秒, 最大重试次数,
+    def generate_image(self, 提示词, API密钥, API地址, 模型, 宽高比, 
+                       响应格式, 超时秒数, 最大重试次数, 并发请求数,
+                       启用分行提示词, 匹配参考尺寸, 详细日志,
                        参考图片1=None, 参考图片2=None, 参考图片3=None, 参考图片4=None):
         """主生成函数 - 重构为清晰的流程"""
         
@@ -714,14 +714,14 @@ class GeminiBananaNode:
         # 重命名变量以便内部使用
         prompt = 提示词
         enable_multiline = 启用分行提示词
-        concurrent_requests = 每行并发请求数
+        concurrent_requests = 并发请求数
         match_reference_size = 匹配参考尺寸
         api_key = API密钥
         base_url = API地址
         model = 模型
         size = 宽高比
         response_format = 响应格式
-        timeout = 超时时间秒
+        timeout = 超时秒数
         max_retries = 最大重试次数
         
         # 保存配置到独立配置节（重新读取确保不覆盖其他节点配置）
