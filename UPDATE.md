@@ -1,5 +1,784 @@
  更新日志
 
+## v2.10.0 (2026-01-07)
+
+### 🚀 Doubao Seedance - 并发批量生成与多视频输出
+
+#### ✨ 新增功能
+
+**1. 并发批量生成视频**
+
+支持同时创建多个视频生成任务，所有任务完成后统一下载。
+
+**参数说明**：
+
+| 参数 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| 并发请求数 | INT | 同时生成的视频数量 | 1 (1-10) |
+| 启用提示词分行 | BOOLEAN | 是否按行拆分提示词 | False |
+
+**功能特性**：
+- ✅ **三阶段并发流程**：
+  1. 阶段 1：并发创建所有视频生成任务
+  2. 阶段 2：轮询所有任务状态直到全部完成
+  3. 阶段 3：所有任务完成后统一下载视频
+- ✅ **智能线程池**：使用 `ThreadPoolExecutor` 并发创建任务
+- ✅ **实时进度**：显示每个任务的状态和进度
+- ✅ **错误容忍**：单个任务失败不影响其他任务
+- ✅ **中断支持**：支持 Ctrl+C 和 ComfyUI Stop 按钮中断
+
+**三种使用场景**：
+
+1. **单任务模式**：
+   - 并发请求数 = 1
+   - 启用提示词分行 = False
+   - 生成 1 个视频
+
+2. **相同提示词重复模式**：
+   - 并发请求数 = 3
+   - 启用提示词分行 = False
+   - 相同提示词重复 3 次，生成 3 个视频
+
+3. **提示词分行模式**：
+   - 启用提示词分行 = True
+   - 按换行符拆分提示词，每行一个任务
+   - 3 行提示词 = 3 个视频
+   - 并发请求数被忽略
+
+**技术实现**：
+
+```python
+# 阶段 1：并发创建任务
+with ThreadPoolExecutor(max_workers=min(len(prompts), 5)) as executor:
+    futures = [
+        executor.submit(
+            self._create_single_task,
+            prompt, API密钥, API地址, 模型,
+            参考图片1, 参考图片2, 分辨率, 宽高比,
+            时长, 帧率, 随机种子, 固定镜头,
+            水印, 生成音频, 超时秒数, 忽略SSL证书
+        )
+        for idx, prompt in enumerate(prompts)
+    ]
+    
+    # 收集所有任务 ID
+    for idx, future in enumerate(as_completed(futures)):
+        task_id, video_url = future.result()
+        task_infos.append({...})
+
+# 阶段 2：轮询所有任务
+while True:
+    for task in task_infos:
+        if task['status'] in ['pending', 'running']:
+            # 查询任务状态
+            status = self.query_task_status(task['task_id'])
+            task['status'] = status
+    
+    # 检查是否所有任务完成
+    if all(task['status'] in ['success', 'failed'] for task in task_infos):
+        break
+
+# 阶段 3：下载所有视频
+for task in success_tasks:
+    video_obj = self.download_video(task['video_url'])
+    video_objects.append(video_obj)
+
+return (video_objects, stats)  # 返回所有视频
+```
+
+**使用示例**：
+
+*相同提示词重复生成*：
+```
+Doubao Seedance Video
+  ├─ 提示词: "一个机器人在未来城市中行走..."
+  ├─ 并发请求数: 3
+  ├─ 启用提示词分行: False ☐
+  └─ 视频输出 ──→ SaveVideo (输出3个视频)
+```
+
+*提示词分行批量生成*：
+```
+Doubao Seedance Video
+  ├─ 提示词: "一个机器人在未来城市中行走
+             赛博朋克风格的城市夜景
+             海洋深处的神秘生物"
+  ├─ 启用提示词分行: True ☑
+  ├─ 并发请求数: 1 (自动忽略)
+  └─ 视频输出 ──→ SaveVideo (输出3个视频)
+```
+
+---
+
+**2. 多视频输出支持**
+
+并发生成的所有视频自动保存到 ComfyUI。
+
+**技术实现**：
+
+```python
+# 节点定义
+RETURN_TYPES = ("VIDEO", "STRING")
+RETURN_NAMES = ("视频输出", "生成统计")
+OUTPUT_IS_LIST = (True, False)  # 视频输出为列表，统计不是
+
+# 返回所有视频
+return (video_objects, stats)  # video_objects 是 VideoObject 列表
+```
+
+**功能特性**：
+- ✅ **单视频兼容**：单个视频也返回列表格式 `[video]`
+- ✅ **多视频输出**：并发生成的所有视频都可保存
+- ✅ **ComfyUI 自动处理**： SaveVideo 节点自动遍历所有视频
+- ✅ **顺序保持**：视频按创建顺序排列
+
+**效果对比**：
+
+*修改前*：
+```
+并发生成 3 个视频
+  ├─ 下载 3 个视频到 output/
+  ├─ 返回第 1 个 VideoObject
+  └─ ComfyUI 只能保存 1 个视频 ❌
+```
+
+*修改后*：
+```
+并发生成 3 个视频
+  ├─ 下载 3 个视频到 output/
+  ├─ 返回 [video1, video2, video3] 列表
+  └─ ComfyUI 保存所有 3 个视频 ✅
+```
+
+---
+
+**3. 生成统计信息**
+
+并发模式下输出详细的统计信息。
+
+**输出示例**：
+```
+[Seedance] ============================================================
+[Seedance] 🚀 并发批量生成完成
+[Seedance]   - 总任务数: 3
+[Seedance]   - 创建成功: 3
+[Seedance]   - 生成成功: 3
+[Seedance]   - 下载成功: 3
+[Seedance]   - 失败任务: 0
+[Seedance]   - 总用时: 93.2s
+[Seedance] ============================================================
+```
+
+**功能特性**：
+- ✅ 显示总任务数和各阶段成功数
+- ✅ 显示失败任务数
+- ✅ 显示总耗时
+- ✅ 单任务模式不显示统计信息
+
+---
+
+#### 🔧 参数调整
+
+**新增参数**：
+
+| 参数 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| 并发请求数 | INT | 同时生成的视频数量 | 1 (1-10) |
+| 启用提示词分行 | BOOLEAN | 是否按行拆分提示词 | False |
+
+**参数顺序调整**（从上到下）：
+
+1. 提示词
+2. API密钥
+3. API地址
+4. 模型
+5. 分辨率
+6. 宽高比
+7. 时长
+8. 帧率
+9. 随机种子
+10. 固定镜头
+11. 水印
+12. 生成音频
+13. **并发请求数** (新增)
+14. **启用提示词分行** (新增)
+15. 轮询间隔
+16. 超时秒数 (原“请求超时”)
+17. 最大等待时长
+18. 详细日志 (原“调试模式”)
+19. 忽略SSL证书
+
+**参数重命名**：
+- `请求超时` → `超时秒数`
+- `调试模式` → `详细日志`
+
+---
+
+#### 📊 性能优化
+
+**1. 并发任务创建**
+
+使用 `ThreadPoolExecutor` 并发创建多个视频生成任务。
+
+**性能对比**：
+```
+串行模式：3个视频
+  ├─ 创建任务：3次（串行）
+  ├─ 等待生成：~180秒
+  └─ 总耗时：~190秒
+
+并发模式：3个视频
+  ├─ 创建任务：3次（并发）
+  ├─ 等待生成：~90秒 (同时进行)
+  └─ 总耗时：~93秒 ✅ (提升 2x)
+```
+
+---
+
+**2. 状态轮询优化**
+
+所有任务共享相同的轮询周期，避免重复等待。
+
+**实现**：
+```python
+while True:
+    # 一次查询所有任务的状态
+    for task in task_infos:
+        if task['status'] in ['pending', 'running']:
+            new_status = self.query_task_status(task['task_id'])
+            task['status'] = new_status
+    
+    # 检查是否全部完成
+    if all_completed:
+        break
+    
+    # 统一等待
+    time.sleep(轮询间隔)
+```
+
+**收益**：
+- ✅ 所有任务同步轮询，不浪费时间
+- ✅ 实时显示所有任务的进度
+- ✅ 减少 API 请求次数
+
+---
+
+#### 🐞 Bug 修复
+
+**1. 修复多视频输出问题**
+
+*问题*：
+- 并发生成多个视频后，只有第一个视频被保存
+- ComfyUI 的 SaveVideo 节点只接收到一个 VideoObject
+
+*解决方案*：
+```python
+# 设置 OUTPUT_IS_LIST
+OUTPUT_IS_LIST = (True, False)
+
+# 返回所有视频列表
+return (video_objects, stats)  # 而不是 video_objects[0]
+```
+
+---
+
+**2. 解耦并发请求数和提示词分行**
+
+*问题*：
+- 之前需要 `并发请求数 > 1` 且 `提示词行数 > 1` 才能进入并发模式
+- 这两个功能被误认为是关联的
+
+*解决方案*：
+```python
+# 提示词处理逻辑
+if 启用提示词分行:
+    # 按换行符拆分
+    prompts = [line.strip() for line in 提示词.split('\n') if line.strip()]
+else:
+    # 根据并发请求数重复提示词
+    prompts = [提示词] * 并发请求数
+
+# 判断是否进入并发模式
+if len(prompts) > 1:
+    # 并发模式
+    return self._generate_videos_concurrent(...)
+else:
+    # 单任务模式
+    return self._generate_single_video(...)
+```
+
+**收益**：
+- ✅ 两个功能完全独立，逻辑更清晰
+- ✅ 用户可以自由选择使用哪种模式
+- ✅ 支持相同提示词重复生成
+
+---
+
+#### 📝 文档更新
+
+**README.md**：
+- ✅ 更新功能特性列表
+- ✅ 新增并发模式说明
+- ✅ 新增多视频输出说明
+- ✅ 更新所有参数说明（中文名称）
+- ✅ 新增并发批量生成使用示例
+- ✅ 新增三种使用场景说明
+- ✅ 新增并发流程图
+
+**UPDATE.md**：
+- ✅ 新增 v2.10.0 版本更新日志
+- ✅ 详细说明所有新功能
+- ✅ 提供技术实现细节
+- ✅ 列出所有 Bug 修复
+
+---
+
+#### ✅ 向后兼容
+
+**完全兼容**：
+- ✅ 所有新增参数都是 optional
+- ✅ 默认行为与之前一致（单任务模式）
+- ✅ 现有工作流无需修改
+- ✅ 单视频输出仍然正常工作
+
+---
+
+#### 💡 最佳实践
+
+**并发批量生成**：
+- ✅ 合理设置并发请求数（建议 3-5）
+- ✅ 使用提示词分行功能生成不同内容
+- ✅ 注意 API 限流，避免过多并发
+- ✅ 开启详细日志查看实时进度
+
+**性能优化**：
+- ✅ 利用并发模式提升 2-3 倍效率
+- ✅ 所有视频同时生成，不浪费时间
+- ✅ 轮询间隔设置为 10秒，平衡响应和请求
+
+---
+
+## v2.9.0 (2026-01-07)
+
+### 🚀 Doubao Seedance - 生产级优化与稳定性提升
+
+#### ✨ 核心优化
+
+**1. TLS/SSL 证书校验安全升级**
+
+默认开启证书校验，提升安全性，同时提供调试选项。
+
+**技术实现**:
+```python
+def create_ssl_context(self, insecure=False):
+    """创建 SSL 上下文，默认开启证书校验"""
+    if insecure:
+        # 调试模式：禁用证书校验
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    # 生产模式：启用证书校验
+    return ssl.create_default_context()
+```
+
+**新增参数**:
+
+| 参数 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| 忽略SSL证书 | BOOLEAN | 忽略 SSL 证书校验（仅用于调试） | False |
+
+**功能特性**:
+- ✅ **默认安全**: 生产环境自动开启证书校验
+- ✅ **调试友好**: 可选禁用证书校验用于内网测试
+- ✅ **防止 MITM**: 避免中间人攻击风险
+- ✅ **稳定性提升**: 在正规环境更稳定可靠
+
+**收益**:
+- 🔒 提升安全性，符合生产级标准
+- 🔧 保留调试灵活性，兼顾开发需求
+- 🌐 在 Cloudflare 等代理环境更可靠
+
+---
+
+**2. API 路径解析重构（关键 Bug 修复）**
+
+完美支持反代、中转站、网关等复杂部署场景。
+
+**问题场景**:
+```
+用户配置: https://api.xxx.com/proxy/openai
+之前行为: 实际请求 https://api.xxx.com/v1/video/generations
+结果: 路径被截断，请求失败 ❌
+```
+
+**解决方案**:
+```python
+# 在 generate_video() 开始时统一解析
+parsed_url = urlparse(API地址)
+self.api_host = parsed_url.netloc
+self.api_base_path = parsed_url.path.rstrip('/') if parsed_url.path else ''
+
+# 后续所有请求使用统一路径
+path = f"{self.api_base_path}/v1/video/generations"
+path = f"{self.api_base_path}/v1/video/generations/{task_id}"  # 查询
+```
+
+**修复后**:
+```
+用户配置: https://api.xxx.com/proxy/openai
+实际请求: https://api.xxx.com/proxy/openai/v1/video/generations
+结果: 完美支持反代 ✅
+```
+
+**功能特性**:
+- ✅ **统一解析**: 只在开始时解析一次，避免重复处理
+- ✅ **路径完整**: 保留完整的 base_path
+- ✅ **支持反代**: 完美兼容各种代理、网关、中转站
+- ✅ **协议自动补全**: 自动添加 https:// 前缀
+
+**收益**:
+- 🌐 支持复杂部署架构
+- 🔧 修复关键路径截断 Bug
+- 📊 更好的企业级兼容性
+
+---
+
+**3. 轮询状态机归一化重构**
+
+统一不同 API 返回的状态格式，提升健壮性。
+
+**状态归一化函数**:
+```python
+def normalize_status(self, raw_status):
+    """统一状态格式"""
+    status_mapping = {
+        # 进行中
+        "queued": "running",
+        "processing": "running",
+        "running": "running",
+        # 成功
+        "succeeded": "success",
+        "completed": "success",
+        "success": "success",
+        # 失败
+        "failed": "failed",
+        "error": "failed",
+        "expired": "failed",
+        # 取消
+        "cancelled": "cancelled",
+        "canceled": "cancelled",
+    }
+    return status_mapping.get(raw_status.lower(), 'unknown')
+```
+
+**轮询逻辑优化**:
+```python
+# 原始状态
+raw_status = inner_data.get('status', 'unknown')
+
+# 归一化
+status = self.normalize_status(raw_status)
+
+# 日志输出
+self.log(f"[{elapsed}s] Task status: {raw_status} -> {status}", "INFO")
+
+# 统一判断
+if status == 'success':      # 成功
+if status == 'failed':       # 失败
+if status == 'running':      # 进行中
+if status == 'cancelled':    # 取消
+if status == 'unknown':      # 未知
+```
+
+**功能特性**:
+- ✅ **状态统一**: 不同 API 格式自动归一化
+- ✅ **易于扩展**: 新增状态只需修改映射表
+- ✅ **调试友好**: 同时输出原始状态和归一化状态
+- ✅ **逻辑清晰**: 只需判断 5 种归一化状态
+
+**收益**:
+- 🛡️ 更健壮，兼容多种 API 返回格式
+- 🔧 更易维护，状态判断逻辑统一
+- 📊 更清晰，调试信息更详细
+
+---
+
+**4. VideoObject 懒加载优化**
+
+减少不必要的 IO 操作，提升性能。
+
+**实现**:
+```python
+class VideoObject:
+    def __init__(self, filepath, is_placeholder=False):
+        self._metadata_loaded = False  # 懒加载标志
+        # 不立即加载元数据
+    
+    def get_dimensions(self):
+        """懒加载 - 只在需要时才读取"""
+        if not self._metadata_loaded:
+            self._load_metadata()
+        return (self._width, self._height)
+    
+    def get_fps(self):
+        if not self._metadata_loaded:
+            self._load_metadata()
+        return self._fps
+```
+
+**功能特性**:
+- ✅ **按需加载**: 只在实际调用时才读取视频文件
+- ✅ **避免重复**: 加载后设置标志，不重复读取
+- ✅ **减少 IO**: 如果不调用获取方法，完全不读取
+- ✅ **向后兼容**: API 接口不变
+
+**收益**:
+- ⚡ 减少 IO 阻塞，提升响应速度
+- 💾 降低内存占用
+- 📹 大视频场景性能提升明显
+
+---
+
+**5. 图像输入优化与警告增强**
+
+自动压缩图片并警告用户使用公网 URL。
+
+**实现**:
+```python
+def tensor_to_image_url(self, tensor, max_size=1024, quality=85):
+    """转换图片并自动压缩"""
+    # 限制尺寸
+    if max(pil_image.size) > max_size:
+        pil_image.thumbnail((max_size, max_size), Image.LANCZOS)
+        self.log(f"⚠️ 图像已缩放: {original_size} -> {pil_image.size}", "INFO")
+    
+    # 降低质量
+    pil_image.save(buffer, format='JPEG', quality=quality)
+    
+    # 警告大 base64
+    size_mb = len(base64_string) / (1024 * 1024)
+    if size_mb > 5:
+        self.log(f"⚠️ 警告: base64 超过 5MB ({size_mb:.2f}MB)", "INFO")
+        self.log("建议: 使用公网可访问的图片 URL", "INFO")
+```
+
+**功能特性**:
+- ✅ **自动压缩**: 大图自动缩放到 1024px
+- ✅ **质量控制**: JPEG 质量降至 85，减小体积
+- ✅ **实时警告**: 超过 5MB 立即提示用户
+- ✅ **明确建议**: 提示使用公网 URL 而非 base64
+
+**收益**:
+- 📦 减少 payload 体积，避免 413/502 错误
+- ⚡ 提高 API 请求成功率
+- 👤 提升用户体验，明确问题所在
+
+---
+
+**6. 日志系统统一优化**
+
+所有日志添加统一前缀，支持分级控制。
+
+**实现**:
+```python
+def log(self, message, level="INFO"):
+    """统一日志输出"""
+    if level == "DEBUG" and not self.verbose:
+        return
+    prefix = "[Seedance]" if not message.startswith("[") else ""
+    print(f"{prefix} {message}" if prefix else message)
+```
+
+**日志输出示例**:
+```
+[Seedance] 解析 API 地址: host=api.xxx.com, base_path='/proxy'
+[Seedance] 调用 Doubao Seedance API: api.xxx.com/proxy/v1/video/generations
+[Seedance] 模型: doubao-seedance-1-5-pro-251215
+[Seedance] API调用成功
+[Seedance] 视频生成任务已创建: task_12345
+[Seedance] [30s] Task status: succeeded -> success
+[Seedance] ✓ 视频下载成功: output/doubao_seedance_1736234567890.mp4
+```
+
+**功能特性**:
+- ✅ **统一前缀**: 所有日志带 [Seedance] 标识
+- ✅ **分级控制**: DEBUG 日志只在 verbose 模式显示
+- ✅ **易于检索**: 快速定位节点日志
+- ✅ **专业规范**: 符合生产级日志标准
+
+**收益**:
+- 🔍 日志更易检索和过滤
+- 📊 调试更高效
+- 🎯 生产环境日志更清晰
+
+---
+
+**7. IS_CHANGED 优化**
+
+使用更优雅的 `float("nan")` 替代 `time.time()`。
+
+**修改**:
+```python
+# 之前
+@classmethod
+def IS_CHANGED(cls, **kwargs):
+    import time
+    return time.time()
+
+# 现在
+@classmethod
+def IS_CHANGED(cls, **kwargs):
+    return float("nan")
+```
+
+**收益**:
+- ✅ 更优雅，不需要 import time
+- ✅ 性能略优，不需要系统调用
+- ✅ 语义更清晰（NaN 表示总是变化）
+- ✅ ComfyUI 官方推荐做法
+
+---
+
+#### 📊 参数更新
+
+**新增参数**:
+
+| 参数 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| 忽略SSL证书 | BOOLEAN | 忽略 SSL 证书校验（仅调试） | False |
+
+**完整参数列表**:
+
+| 参数 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| 提示词 | STRING | 视频生成提示词 | "多个镜头..." |
+| API密钥 | STRING | API 身份验证密钥 | sk-xxx |
+| API地址 | STRING | API 服务地址 | https://api.openai.com |
+| 模型 | ENUM | 选择模型 | doubao-seedance-1-5-pro-251215 |
+| 参考图片1-2 | IMAGE | 可选参考图片 | - |
+| 分辨率 | ENUM | 视频分辨率 | 1080p |
+| 宽高比 | ENUM | 视频宽高比 | adaptive |
+| 时长 | INT | 视频时长（秒） | 5 (2-12) |
+| 帧率 | ENUM | 帧率 | 24 |
+| 随机种子 | INT | 随机种子 | -1 |
+| 固定镜头 | BOOLEAN | 固定摄像头 | False |
+| 水印 | BOOLEAN | 添加水印 | False |
+| 生成音频 | BOOLEAN | 生成画面同步音频 | False |
+| 调试模式 | BOOLEAN | 输出完整响应 | False |
+| 请求超时 | INT | API 请求超时（秒） | 60 (60-600) |
+| 轮询间隔 | INT | 轮询间隔（秒） | 10 (2-30) |
+| 最大等待时长 | INT | 最大等待时间（秒） | 300 (60-3600) |
+| **忽略SSL证书** | **BOOLEAN** | **忽略证书校验（调试）** | **False** |
+
+---
+
+#### 🎯 使用示例
+
+**标准使用（生产环境）**:
+```
+Doubao Seedance
+  ├─ 提示词: "一个机器人在未来城市中行走..."
+  ├─ API地址: https://api.openai.com
+  ├─ 忽略SSL证书: False  ← 生产环境，开启证书校验
+  └─ video ──→ SaveVideo
+```
+
+**反代/中转站场景**:
+```
+Doubao Seedance
+  ├─ API地址: https://api.proxy.com/v1/doubao
+  ├─ 提示词: "..." 
+  └─ video ──→ SaveVideo
+  
+实际请求: https://api.proxy.com/v1/doubao/v1/video/generations ✅
+```
+
+**内网调试场景**:
+```
+Doubao Seedance
+  ├─ API地址: http://192.168.1.100:8080
+  ├─ 忽略SSL证书: True  ← 内网测试，禁用证书校验
+  ├─ 调试模式: True  ← 输出详细日志
+  └─ video ──→ SaveVideo
+```
+
+**图生视频（优化后）**:
+```
+Load Image ──→ 参考图片1
+                 ↓
+Doubao Seedance
+  ├─ 提示词: "图片中的场景开始动起来..."
+  ├─ 参考图片1: <connected>
+  ├─ (自动压缩到1024px并警告)
+  └─ video ──→ SaveVideo
+```
+
+---
+
+#### 📝 技术亮点
+
+**1. 架构改进**:
+- ✅ 统一 API 路径解析（一次解析，多处使用）
+- ✅ 状态机归一化（映射表驱动）
+- ✅ SSL 上下文统一管理
+- ✅ 日志系统标准化
+
+**2. 性能优化**:
+- ✅ VideoObject 懒加载（减少 IO）
+- ✅ 图像自动压缩（减少 payload）
+- ✅ 连接池复用（SSL 上下文）
+- ✅ IS_CHANGED 优化（避免系统调用）
+
+**3. 稳定性提升**:
+- ✅ TLS 证书校验（防止 MITM）
+- ✅ 路径解析修复（支持反代）
+- ✅ 状态归一化（兼容多种格式）
+- ✅ 异常处理规范（直接抛出异常）
+
+**4. 用户体验**:
+- ✅ 统一日志前缀（易于检索）
+- ✅ base64 警告提示（明确问题）
+- ✅ 调试信息增强（快速定位）
+- ✅ 参数语义清晰（忽略SSL证书）
+
+---
+
+#### 🔧 向后兼容
+
+**完全兼容**:
+- ✅ 所有新增参数都是 optional
+- ✅ 默认行为与优化前一致（除 SSL 校验）
+- ✅ VideoObject API 接口不变
+- ✅ 现有工作流无需修改
+
+**唯一变化**:
+- ⚠️ SSL 证书校验默认开启（更安全）
+- ✅ 如需内网调试，手动启用"忽略SSL证书"
+
+---
+
+#### 💡 最佳实践
+
+**生产环境**:
+- ✅ 使用默认配置（SSL 校验开启）
+- ✅ 关闭调试模式（减少日志）
+- ✅ 合理设置超时时间
+- ✅ 图片使用公网 URL 而非 base64
+
+**调试环境**:
+- ✅ 开启调试模式（查看详细日志）
+- ✅ 内网测试时启用"忽略SSL证书"
+- ✅ 观察状态归一化日志
+- ✅ 检查路径解析是否正确
+
+**反代场景**:
+- ✅ API地址包含完整路径
+- ✅ 检查日志确认实际请求路径
+- ✅ 使用 SSL 证书校验（更安全）
+
+---
+
 ## v2.8.0 (2026-01-06)
 
 ### 🚀 Doubao Seedream - 批量并发与重试优化

@@ -33,6 +33,15 @@ class DoubaoSeedreamNode:
     支持文生图、图生图、图生组图、多图融合
     """
     
+    def __init__(self):
+        self.verbose = False  # 默认关闭详细日志
+    
+    def log(self, message, level="INFO"):
+        """统一日志输出 (支持分级)"""
+        if level == "DEBUG" and not self.verbose:
+            return  # DEBUG 日志只在 verbose 模式下打印
+        print(message)
+    
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -431,6 +440,9 @@ class DoubaoSeedreamNode:
         """
         生成图片的主函数
         """
+        # 设置日志级别
+        self.verbose = 详细日志
+        
         try:
             # 验证分辨率
             is_valid, error_msg = self.validate_resolution(模型, 宽度, 高度)
@@ -584,11 +596,11 @@ class DoubaoSeedreamNode:
             print(f"={'='*60}\n")
             
             # Debug 模式:输出请求数据
-            if 详细日志:
-                print(f"\n{'='*60}")
-                print(f"🐛 DEBUG: Request Data Summary")
-                print(f"{'='*60}")
-                print(f"总请求数: {len(all_payloads)}")
+            if self.verbose:
+                self.log(f"\n{'='*60}", "DEBUG")
+                self.log(f"🐛 DEBUG: Request Data Summary", "DEBUG")
+                self.log(f"{'='*60}", "DEBUG")
+                self.log(f"总请求数: {len(all_payloads)}", "DEBUG")
                 for payload_info in all_payloads[:3]:  # 只显示前3个请求
                     debug_request = json.loads(payload_info['payload'])
                     if 'image' in debug_request:
@@ -596,11 +608,11 @@ class DoubaoSeedreamNode:
                             debug_request['image'] = [f"<base64_image_{i+1}>" for i in range(len(debug_request['image']))]
                         else:
                             debug_request['image'] = "<base64_image>"
-                    print(f"\n[提示词 {payload_info['prompt_id']}-并发 {payload_info['concurrent_id']}]")
-                    print(json.dumps(debug_request, indent=2, ensure_ascii=False))
+                    self.log(f"\n[提示词 {payload_info['prompt_id']}-并发 {payload_info['concurrent_id']}]", "DEBUG")
+                    self.log(json.dumps(debug_request, indent=2, ensure_ascii=False), "DEBUG")
                 if len(all_payloads) > 3:
-                    print(f"\n... 还有 {len(all_payloads)-3} 个请求(已省略)")
-                print(f"{'='*60}\n")
+                    self.log(f"\n... 还有 {len(all_payloads)-3} 个请求(已省略)", "DEBUG")
+                self.log(f"{'='*60}\n", "DEBUG")
                         
             # 批量并发调用API
             print(f"\n{'='*60}")
@@ -709,10 +721,10 @@ class DoubaoSeedreamNode:
                     result = json.loads(response_text)
                     
                     # Debug 模式：输出完整响应
-                    if 详细日志 and 并发请求数 <= 1:
-                        print(f"\n{'='*60}")
-                        print(f"🐛 DEBUG: Full API Response")
-                        print(f"{'='*60}")
+                    if self.verbose and 并发请求数 <= 1:
+                        self.log(f"\n{'='*60}", "DEBUG")
+                        self.log(f"🐛 DEBUG: Full API Response", "DEBUG")
+                        self.log(f"{'='*60}", "DEBUG")
                         # 创建一个用于显示的响应副本（不包含完整base64）
                         debug_result = json.loads(response_text)
                         if 'data' in debug_result:
@@ -723,8 +735,8 @@ class DoubaoSeedreamNode:
                                         item['b64_json'] = item['b64_json'][:100] + '... (truncated)'
                             elif isinstance(data, dict) and 'b64_json' in data and len(data['b64_json']) > 100:
                                 data['b64_json'] = data['b64_json'][:100] + '... (truncated)'
-                        print(json.dumps(debug_result, indent=2, ensure_ascii=False))
-                        print(f"{'='*60}\n")
+                        self.log(json.dumps(debug_result, indent=2, ensure_ascii=False), "DEBUG")
+                        self.log(f"{'='*60}\n", "DEBUG")
                     
                     # 处理不同的响应格式
                     if 'data' in result:

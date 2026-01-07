@@ -147,7 +147,7 @@ def base64_to_tensor(b64_string: str):
         return None
 
 
-def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120, max_retries: int = 3, backoff: int = 2):
+def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120, max_retries: int = 3, backoff: int = 2, verbose: bool = False):
     """发送 API 请求（支持重试）"""
     import time
     
@@ -188,7 +188,8 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
             
             result = response.json()
             print(f"[SUCCESS] 请求成功！")
-            print(f"[DEBUG] 完整响应数据: {json.dumps(result, ensure_ascii=False, indent=2)}")
+            if verbose:
+                print(f"[DEBUG] 完整响应数据: {json.dumps(result, ensure_ascii=False, indent=2)}")
             
             # 成功后关闭 response (但保留 Session)
             response.close()
@@ -218,7 +219,8 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
         except requests.exceptions.Timeout as exc:
             last_error = exc
             print(f"[ERROR] 请求超时 (尝试 {attempt}/{max_retries}): {exc}")
-            print(f"[DEBUG] 超时类型: {type(exc).__name__}")
+            if verbose:
+                print(f"[DEBUG] 超时类型: {type(exc).__name__}")
             
         except requests.exceptions.ConnectionError as exc:
             last_error = exc
@@ -427,7 +429,7 @@ class GeminiBananaNode:
             print(f"\n[INFO] ▶ 任务 {task_id} 开始请求: {task_prompt[:30]}...")
             
             try:
-                result = make_api_request(base_url, headers, task_payload, timeout, max_retries)
+                result = make_api_request(base_url, headers, task_payload, timeout, max_retries, 2, self.verbose)
                 print(f"[SUCCESS] ✅ 任务 {task_id} 请求成功")
                 return {
                     "task_id": task_id,

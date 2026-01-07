@@ -166,7 +166,7 @@ def base64_to_tensor(b64_string: str):
         return None
 
 
-def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120, max_retries: int = 3, backoff: int = 2):
+def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120, max_retries: int = 3, backoff: int = 2, verbose: bool = False):
     """发送 API 请求（支持重试）"""
     import time
     
@@ -206,12 +206,14 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
             response.raise_for_status()
             
             # 打印响应头信息（用于调试）
-            print(f"[DEBUG] 响应 Content-Type: {response.headers.get('Content-Type', 'unknown')}")
-            print(f"[DEBUG] 响应 Content-Length: {response.headers.get('Content-Length', 'unknown')}")
+            if verbose:
+                print(f"[DEBUG] 响应 Content-Type: {response.headers.get('Content-Type', 'unknown')}")
+                print(f"[DEBUG] 响应 Content-Length: {response.headers.get('Content-Length', 'unknown')}")
             
             # 获取原始响应文本（用于调试）
             response_text = response.text
-            print(f"[DEBUG] 响应原始文本（前500字符）: {response_text[:500]}")
+            if verbose:
+                print(f"[DEBUG] 响应原始文本（前500字符）: {response_text[:500]}")
             
             # 检查响应是否为空
             if not response_text or response_text.strip() == "":
@@ -225,11 +227,13 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
             except json.JSONDecodeError as e:
                 print(f"[ERROR] ❌ JSON 解析失败: {e}")
                 print(f"[ERROR] 响应不是有效的 JSON 格式")
-                print(f"[DEBUG] 完整响应文本: {response_text}")
+                if verbose:
+                    print(f"[DEBUG] 完整响应文本: {response_text}")
                 raise ValueError(f"API 返回的内容不是有效的 JSON 格式，响应内容: {response_text[:200]}...")
             
             print(f"[SUCCESS] 请求成功！")
-            print(f"[DEBUG] 完整响应数据: {json.dumps(result, ensure_ascii=False, indent=2)}")
+            if verbose:
+                print(f"[DEBUG] 完整响应数据: {json.dumps(result, ensure_ascii=False, indent=2)}")
             
             # 成功后关闭 response (但保留 Session)
             response.close()
@@ -259,7 +263,8 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
         except requests.exceptions.Timeout as exc:
             last_error = exc
             print(f"[ERROR] 请求超时 (尝试 {attempt}/{max_retries}): {exc}")
-            print(f"[DEBUG] 超时类型: {type(exc).__name__}")
+            if verbose:
+                print(f"[DEBUG] 超时类型: {type(exc).__name__}")
             
         except requests.exceptions.ConnectionError as exc:
             last_error = exc
@@ -277,15 +282,16 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
         except Exception as exc:
             last_error = exc
             print(f"[ERROR] 未知错误 (尝试 {attempt}/{max_retries}): {exc}")
-            print(f"[DEBUG] 错误类型: {type(exc).__name__}")
-            # 打印响应内容用于调试
-            if response is not None:
-                try:
-                    print(f"[DEBUG] 响应状态码: {response.status_code}")
-                    print(f"[DEBUG] 响应头: {dict(response.headers)}")
-                    print(f"[DEBUG] 响应文本: {response.text[:500]}")
-                except:
-                    pass
+            if verbose:
+                print(f"[DEBUG] 错误类型: {type(exc).__name__}")
+                # 打印响应内容用于调试
+                if response is not None:
+                    try:
+                        print(f"[DEBUG] 响应状态码: {response.status_code}")
+                        print(f"[DEBUG] 响应头: {dict(response.headers)}")
+                        print(f"[DEBUG] 响应文本: {response.text[:500]}")
+                    except:
+                        pass
         
         finally:
             # 确保 response 被关闭 (但保留线程本地 Session)
@@ -497,21 +503,25 @@ class NanoBananaNode:
                 {"text": prompt_text}
             ]
             
-            # 处理输入图片（图生图模式）
+            # 处理输入图片（图生图/多图融合模式）
             if input_images:
-                # 使用第一张参考图作为输入
-                base64_image = tensor_to_base64(input_images[0])
-                # tensor_to_base64 返回 data URI，需要提取逗号后面的纯 Base64 数据
-                if isinstance(base64_image, str) and base64_image.startswith("data:image"):
-                    base64_image = base64_image.split(",", 1)[1]
-                contents_parts.append(
-                    {
-                        "inline_data": {
-                            "mime_type": "image/jpeg",
-                            "data": base64_image
+                print(f"[INFO] 检测到 {len(input_images)} 张参考图片，启用多图融合模式")
+                # 将所有参考图片都添加到 parts 数组中
+                for img_idx, img_tensor in enumerate(input_images, 1):
+                    base64_image = tensor_to_base64(img_tensor)
+                    # tensor_to_base64 返回 data URI，需要提取逗号后面的纯 Base64 数据
+                    if isinstance(base64_image, str) and base64_image.startswith("data:image"):
+                        base64_image = base64_image.split(",", 1)[1]
+                    
+                    contents_parts.append(
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": base64_image
+                            }
                         }
-                    }
-                )
+                    )
+                    print(f"[INFO] 已添加参考图片 {img_idx}/{len(input_images)} 到 parts 数组")
             
             # 构建 Gemini 原生请求体
             payload = {
@@ -576,10 +586,10 @@ class NanoBananaNode:
         }
         
         # 打印完整的payload用于调试（只打印第一个）
-        if payload_list:
-            print(f"[DEBUG] 完整 payload 结构（示例）:")
+        if payload_list and self.verbose:
+            self.log(f"[DEBUG] 完整 payload 结构（示例）:", "DEBUG")
             try:
-                print(json.dumps(payload_list[0][2], ensure_ascii=False)[:500] + "...")
+                self.log(json.dumps(payload_list[0][2], ensure_ascii=False)[:500] + "...", "DEBUG")
             except Exception as e:
                 print(f"[WARN] payload 序列化失败: {e}")
         
@@ -601,7 +611,9 @@ class NanoBananaNode:
                         headers, 
                         payload_data,  # 已经是副本
                         超时秒数, 
-                        最大重试次数
+                        最大重试次数,
+                        2,  # backoff
+                        详细日志  # 传递 verbose 参数
                     ) 
                     for line_idx, prompt_text, payload_data in payload_list
                 ]
@@ -707,7 +719,7 @@ class NanoBananaNode:
             
             if not output_tensors:
                 print("[ERROR] ❌ 未获取到任何图片数据！")
-                print(f"[DEBUG] 输出 tensors 数量: {len(output_tensors)}")
+                self.log(f"[DEBUG] 输出 tensors 数量: {len(output_tensors)}", "DEBUG")
                 # 直接抛出异常，不返回默认图片
                 raise RuntimeError("未获取到任何图片数据")
             
@@ -765,7 +777,7 @@ class NanoBananaNode:
         except Exception as e:
             # 所有异常统一处理
             print(f"[ERROR] 生成失败: {e}")
-            print(f"[DEBUG] 异常类型: {type(e).__name__}")
+            self.log(f"[DEBUG] 异常类型: {type(e).__name__}", "DEBUG")
             import traceback
             traceback.print_exc()
             raise
