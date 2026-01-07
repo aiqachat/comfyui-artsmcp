@@ -612,10 +612,15 @@ class DoubaoSeedanceNode:
         
         # 准备提示词列表
         if 启用提示词分行:
-            # 启用分行模式：按换行符拆分
-            prompts = [line.strip() for line in 提示词.split('\n') if line.strip()]
+            # 启用分行模式：按换行符拆分，每行提示词可按并发请求数重复
+            base_prompts = [line.strip() for line in 提示词.split('\n') if line.strip()]
+            prompts = []
+            for p in base_prompts:
+                for _ in range(并发请求数):
+                    prompts.append(p)
         else:
-            # 未启用分行：根据并发请求数重复提示词
+            # 未启用分行：根据并发请求数重复同一提示词
+            base_prompts = [提示词]
             prompts = [提示词] * 并发请求数
         
         # 打印并发模式判断信息
