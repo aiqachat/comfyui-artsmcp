@@ -103,6 +103,7 @@ class DoubaoSeedreamNode:
                     "default": 1,
                     "min": 1,
                     "max": 10,
+                    "step": 1,
                     "description": "并发请求的数量，1=单次请求，2-10=并发多次请求",
                     "label": "并发请求数"
                 }),
