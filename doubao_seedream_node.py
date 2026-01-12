@@ -707,11 +707,14 @@ class DoubaoSeedreamNode:
                         
             if not successful_responses:
                 print(f"\n[ERROR] 所有请求都失败了")
-                if 输入图片1 is not None:
-                    return (输入图片1,)
-                else:
-                    default_tensor = torch.zeros((1, 512, 512, 3))
-                    return (default_tensor,)
+                # 收集失败原因
+                failed_responses = [r for r in all_responses if not r['success']]
+                error_details = []
+                for r in failed_responses[:3]:  # 只显示前3个错误
+                    status = r.get('status_code', 'Unknown')
+                    error_details.append(f"状态码: {status}")
+                error_msg = f"API请求失败: {', '.join(error_details)}"
+                raise ValueError(error_msg)
             
             # 处理所有响应,提取图片URL和base64数据
             all_image_urls = []
@@ -850,16 +853,10 @@ class DoubaoSeedreamNode:
                     return (batch_tensor,)
                 
                 print("[ERROR] 下载所有图片失败")
+                raise ValueError("图片下载失败,请检查网络连接或响应格式")
             else:
                 print("[ERROR] API响应中未找到图片URL或base64数据")
-            
-            # 如果失败，返回默认图像或原始输入
-            if 输入图片1 is not None:
-                return (输入图片1,)
-            else:
-                # 创建一个默认的黑色图像
-                default_tensor = torch.zeros((1, 512, 512, 3))
-                return (default_tensor,)
+                raise ValueError("API响应格式错误,未找到图片数据")
             
         except Exception as e:
             print(f"Error in generate_image: {e}")

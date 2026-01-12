@@ -64,16 +64,54 @@ RESPONSE_FORMAT_MAP = {
 }
 
 
-def get_config_value(section, key, fallback=None):
-    """从配置文件获取配置值"""
-    global CONFIG
-    try:
+class ConfigManager:
+    """配置管理单例类"""
+    _instance = None
+    _config = None
+    _config_path = Path(__file__).parent / "config.ini"
+    _config_section = "Nano-banana"
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._load_config()
+        return cls._instance
+    
+    @classmethod
+    def _load_config(cls):
+        """加载配置文件"""
+        cls._config = configparser.ConfigParser()
+        if cls._config_path.exists():
+            cls._config.read(cls._config_path, encoding="utf-8")
+        else:
+            cls._config[cls._config_section] = {}
+            with cls._config_path.open("w", encoding="utf-8") as fp:
+                cls._config.write(fp)
+    
+    def get_value(self, key, fallback=None):
+        """获取配置值"""
         # 重新读取配置文件以确保获取最新值
-        CONFIG.read(CONFIG_PATH, encoding="utf-8")
-        return CONFIG.get(section, key, fallback=fallback)
-    except Exception as e:
-        print(f"[CONFIG] 读取配置失败: {e}")
-        return fallback
+        self._load_config()
+        try:
+            return self._config.get(self._config_section, key, fallback=fallback)
+        except Exception as e:
+            print(f"[CONFIG] 读取配置失败: {e}")
+            return fallback
+    
+    def set_value(self, key, value):
+        """设置配置值"""
+        try:
+            if not self._config.has_section(self._config_section):
+                self._config.add_section(self._config_section)
+            self._config.set(self._config_section, key, value)
+            with self._config_path.open("w", encoding="utf-8") as fp:
+                self._config.write(fp)
+            print(f"[CONFIG] 保存 {key} 到配置文件")
+        except Exception as e:
+            print(f"[ERROR] 配置写入失败: {e}")
+
+# 全局配置管理器实例
+config_manager = ConfigManager()
 
 
 def get_session():
