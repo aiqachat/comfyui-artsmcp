@@ -302,7 +302,7 @@ Gemini Banana
 | `API地址` | STRING | API 服务地址 | 默认：https://api.xxx.com |
 | `模型` | ENUM | 模型选择 | doubao-seedance-1-5-pro-251215 / doubao-seedance-1-0-pro-fast-251015 / doubao-seedance-1-0-pro-250528 |
 | `参考图片1-2` | IMAGE | 可选输入图片 | 图生视频起始帧/结束帧或中间帧 |
-| `分辨率` | ENUM | 视频分辨率 | 480p / 720p / 1080p（默认1080p） |
+| `分辨率` | ENUM | 视频分辨率 | 480p / 720p / 1080p（默认1080p，所有模型均支持） |
 | `宽高比` | ENUM | 视频宽高比 | 16:9 / 4:3 / 1:1 / 3:4 / 9:16 / 21:9 / adaptive（默认16:9） |
 | `时长` | INT | 视频时长（秒） | 2-12，默认5 |
 | `帧率` | ENUM | 视频帧率 | 24 |
@@ -590,7 +590,6 @@ pip install requests Pillow opencv-python
 3. **存储空间**：视频文件保存在 `ComfyUI/output/` 目录，请确保有足够空间
 4. **中断恢复**：中断后可通过 Task ID 查询任务状态（日志中会显示）
 5. **参数限制**：
-   - `resolution=1080p` 不支持参考图场景（图生视频）
    - `camerafixed=true` 仅文生视频支持
    - `ratio=adaptive` 仅图生视频支持
 

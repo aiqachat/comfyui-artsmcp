@@ -723,17 +723,7 @@ class DoubaoSeedanceNode:
             raise ValueError(f"无效的 API 地址: {API地址}, 错误: {e}")
         
         try:
-            # 检查模型和分辨率的兼容性
-            if 模型 == "doubao-seedance-1-5-pro-251215" and 分辨率 == "1080p":
-                error_msg = (
-                    "⚠️ 参数不兼容：模型 'doubao-seedance-1-5-pro-251215' 不支持 1080p 分辨率\n"
-                    "📌 该模型仅支持: 480p, 720p\n"
-                    "💡 请修改分辨率参数为 480p 或 720p"
-                )
-                print(f"\n{'='*60}")
-                print(error_msg)
-                print(f"{'='*60}\n")
-                raise ValueError(error_msg)
+            # 检查模型和分辨率的兼容性（已移除限制：doubao-seedance-1-5-pro-251215 现已支持 1080p）
             
             # 保存配置到独立配置节（重新读取确保不覆盖其他节点配置）
             config_writer = configparser.ConfigParser()
@@ -1155,17 +1145,7 @@ class DoubaoSeedanceNode:
             raise ValueError(f"无效的 API 地址: {API地址}, 错误: {e}")
         
         try:
-            # 检查模型和分辨率的兼容性
-            if 模型 == "doubao-seedance-1-5-pro-251215" and 分辨率 == "1080p":
-                error_msg = (
-                    "⚠️ 参数不兼容：模型 'doubao-seedance-1-5-pro-251215' 不支持 1080p 分辨率\n"
-                    "📌 该模型仅支持: 480p, 720p\n"
-                    "💡 请修改分辨率参数为 480p 或 720p"
-                )
-                print(f"\n{'='*60}")
-                print(error_msg)
-                print(f"{'='*60}\n")
-                raise ValueError(error_msg)
+            # 检查模型和分辨率的兼容性（已移除限制：doubao-seedance-1-5-pro-251215 现已支持 1080p）
             
             # 保存配置
             config_writer = configparser.ConfigParser()
