@@ -316,7 +316,7 @@ class DoubaoSeedanceNode:
         
         参数:
             tensor: ComfyUI IMAGE tensor
-            max_size: 最大宽高，默认 1024，减小 base64 体积
+            max_size: 最大宽高，默认 1024，减小 base64 体积（已注释）
             quality: JPEG 质量，默认 85
         """
         try:
@@ -330,21 +330,21 @@ class DoubaoSeedanceNode:
             numpy_image = tensor.cpu().numpy()
             pil_image = Image.fromarray(numpy_image, mode='RGB')
             
-            # 限制图像大小
-            original_size = pil_image.size
-            if max(pil_image.size) > max_size:
-                pil_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-                self.log(f"⚠️ 图像已缩放: {original_size} -> {pil_image.size} (减小 base64 体积)", "INFO")
+            # 注释自动缩放功能：API 文档说明支持 30MB 以下的图片
+            # original_size = pil_image.size
+            # if max(pil_image.size) > max_size:
+            #     pil_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+            #     self.log(f"⚠️ 图像已缩放: {original_size} -> {pil_image.size} (减小 base64 体积)", "INFO")
             
             buffer = io.BytesIO()
             pil_image.save(buffer, format='JPEG', quality=quality)
             img_bytes = buffer.getvalue()
             base64_string = base64.b64encode(img_bytes).decode('utf-8')
             
-            # 警告大base64
+            # 警告大base64（修改阈值为 30MB）
             size_mb = len(base64_string) / (1024 * 1024)
-            if size_mb > 5:
-                self.log(f"⚠️ 警告: 图像 base64 超过 5MB ({size_mb:.2f}MB)，可能导致 API 请求失败", "INFO")
+            if size_mb > 30:
+                self.log(f"⚠️ 警告: 图像 base64 超过 30MB ({size_mb:.2f}MB)，可能导致 API 请求失败", "INFO")
                 self.log("建议: 使用公网可访问的图片 URL 而非 base64", "INFO")
             
             return f"data:image/jpeg;base64,{base64_string}"
