@@ -284,6 +284,16 @@ class DoubaoSeedanceNode:
                     "default": False,
                     "description": "忽略 SSL 证书校验（仅用于调试，不安全）",
                     "label": "⚠️ 忽略SSL证书"
+                }),
+                "生成模式": (["普通生成", "生成draft样片", "从draft_task_id成片"], {
+                    "default": "普通生成",
+                    "label": "🎬 生成模式",
+                    "description": "draft样片仅支持模型 doubao-seedance-1-5-pro-251215 且分辨率固定480p"
+                }),
+                "draft_task_id": ("STRING", {
+                    "default": "",
+                    "label": "📋 draft任务ID",
+                    "description": "从draft成片时填写样片任务ID,例如 cgt-20260121161956-vbk57"
                 })
             }
         }
@@ -602,7 +612,7 @@ class DoubaoSeedanceNode:
                       分辨率="1080p", 宽高比="16:9", 时长=5, 帧率=24,
                       随机种子=-1, 固定镜头=False, 水印=False, 生成音频=False,
                       并发请求数=1, 启用提示词分行=False, 轮询间隔=10, 超时秒数=60, 最大等待时长=300,
-                      详细日志=False, 忽略SSL证书=False):
+                      详细日志=False, 忽略SSL证书=False, 生成模式="普通生成", draft_task_id=""):
         """
         生成视频的主函数
         支持单个提示词生成、相同提示词并发多次生成、多行提示词分行并发生成
@@ -669,7 +679,9 @@ class DoubaoSeedanceNode:
                 超时秒数=超时秒数,
                 最大等待时长=最大等待时长,
                 详细日志=详细日志,
-                忽略SSL证书=忽略SSL证书
+                忽略SSL证书=忽略SSL证书,
+                生成模式=生成模式,
+                draft_task_id=draft_task_id
             )
         else:
             # 单个提示词生成模式
@@ -692,7 +704,9 @@ class DoubaoSeedanceNode:
                 超时秒数=超时秒数,
                 最大等待时长=最大等待时长,
                 详细日志=详细日志,
-                忽略SSL证书=忽略SSL证书
+                忽略SSL证书=忽略SSL证书,
+                生成模式=生成模式,
+                draft_task_id=draft_task_id
             )
             # 单个视频也返回列表格式，保持一致性
             return ([video_obj], stats)
@@ -701,7 +715,7 @@ class DoubaoSeedanceNode:
                               分辨率="1080p", 宽高比="16:9", 时长=5, 帧率=24,
                               随机种子=-1, 固定镜头=False, 水印=False, 生成音频=False,
                               轮询间隔=10, 超时秒数=60, 最大等待时长=300,
-                              详细日志=False, 忽略SSL证书=False):
+                              详细日志=False, 忽略SSL证书=False, 生成模式="普通生成", draft_task_id=""):
         """
         单个视频生成的内部方法
         返回: (VideoObject, stats_string)
@@ -770,6 +784,20 @@ class DoubaoSeedanceNode:
                 "watermark": 水印,
                 "generate_audio": 生成音频
             }
+            
+            # draft / draft_task_id 处理（样例逻辑集成）
+            if 生成模式 == "生成draft样片":
+                if 模型 != "doubao-seedance-1-5-pro-251215":
+                    raise ValueError("draft样片目前仅支持模型 doubao-seedance-1-5-pro-251215")
+                # draft 样片仅支持 480p
+                if 分辨率 != "480p":
+                    self.log("draft样片模式强制使用 480p 分辨率", "INFO")
+                request_data["resolution"] = "480p"
+                request_data["draft"] = True
+            elif 生成模式 == "从draft_task_id成片":
+                if not draft_task_id.strip():
+                    raise ValueError("选择“从draft_task_id成片”模式时必须填写 draft_task_id")
+                request_data["draft_task_id"] = draft_task_id.strip()
             
             # seed参数处理：-1表示随机，>= 0表示固定种子
             if 随机种子 >= 0:
@@ -994,7 +1022,11 @@ class DoubaoSeedanceNode:
                                             # ========== 以上代码已注释 ==========
                                             
                                             elapsed_time = time.time() - start_time
-                                            stats = f"✓ 生成成功 | 用时: {elapsed_time:.1f}s"
+                                            stats = (
+                                                f"✓ 生成成功 | 模式: {生成模式}\n"
+                                                f"任务ID: {task_id}\n"
+                                                f"用时: {elapsed_time:.1f}s"
+                                            )
                                             return (video_obj, stats)
                                         else:
                                             print(f"⚠️ Video succeeded but no URL found")
@@ -1109,7 +1141,7 @@ class DoubaoSeedanceNode:
                                    分辨率="1080p", 宽高比="16:9", 时长=5, 帧率=24,
                                    随机种子=-1, 固定镜头=False, 水印=False, 生成音频=False,
                                    启用提示词分行=False, 并发请求数=1, 轮询间隔=10, 超时秒数=60, 最大等待时长=300,
-                                   详细日志=False, 忽略SSL证书=False):
+                                   详细日志=False, 忽略SSL证书=False, 生成模式="普通生成", draft_task_id=""):
         """
         并发批量生成视频
         流程：
@@ -1186,6 +1218,19 @@ class DoubaoSeedanceNode:
                         "watermark": 水印,
                         "generate_audio": 生成音频
                     }
+                    
+                    # draft / draft_task_id 处理
+                    if 生成模式 == "生成draft样片":
+                        if 模型 != "doubao-seedance-1-5-pro-251215":
+                            raise ValueError("draft样片目前仅支持模型 doubao-seedance-1-5-pro-251215")
+                        if 分辨率 != "480p":
+                            self.log("draft样片模式强制使用 480p 分辨率", "INFO")
+                        request_data["resolution"] = "480p"
+                        request_data["draft"] = True
+                    elif 生成模式 == "从draft_task_id成片":
+                        if not draft_task_id.strip():
+                            raise ValueError("选择“从draft_task_id成片”模式时必须填写 draft_task_id")
+                        request_data["draft_task_id"] = draft_task_id.strip()
                     
                     # seed参数处理
                     if 随机种子 >= 0:
@@ -1401,14 +1446,16 @@ class DoubaoSeedanceNode:
             
             # 生成统计信息
             total_elapsed = time.time() - total_start_time
+            success_task_ids = [task['task_id'] for task in success_tasks]
             stats = (
-                f"🚀 并发批量生成完成\n"
+                f"🚀 并发批量生成完成 | 模式: {生成模式}\n"
                 f"  - 总任务数: {len(prompts)}\n"
                 f"  - 创建成功: {len(task_infos)}\n"
                 f"  - 生成成功: {completed_count}\n"
                 f"  - 下载成功: {download_success}\n"
                 f"  - 失败任务: {failed_count + download_failed}\n"
-                f"  - 总用时: {total_elapsed:.1f}s"
+                f"  - 总用时: {total_elapsed:.1f}s\n"
+                f"  - 成功任务ID: {', '.join(success_task_ids)}"
             )
             
             self.log("\n" + "="*60, "INFO")

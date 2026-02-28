@@ -513,6 +513,16 @@ class GeminiBananaNode:
                         "item": data,
                         "order": len(download_tasks)
                     })
+                elif isinstance(data, str):
+                    # 处理新的响应格式：data 是字符串 URL
+                    self.log(f"[DEBUG] data 是字符串 URL", "DEBUG")
+                    
+                    download_tasks.append({
+                        "task_id": task_id,
+                        "image_idx": 1,
+                        "item": {"url": data},  # 转换为字典格式以便后续处理
+                        "order": len(download_tasks)
+                    })
             else:
                 print(f"[ERROR] 任务 {task_id} 响应中没有 'data' 字段！")
                 print(f"[DEBUG] 完整响应内容: {result}")
