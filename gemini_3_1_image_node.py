@@ -16,6 +16,14 @@ from PIL import Image, ImageOps
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# ComfyUI 中断检测
+try:
+    import comfy.model_management as model_management
+    COMFY_INTERRUPT_AVAILABLE = True
+except ImportError:
+    COMFY_INTERRUPT_AVAILABLE = False
+    print("[WARN] comfy.model_management not available, interrupt detection disabled")
+
 # 线程本地存储,用于 Session 复用
 thread_local = threading.local()
 
@@ -97,21 +105,31 @@ def download_image_to_tensor(url: str, timeout: int = 60):
     """从 URL 下载图片并转换为 tensor"""
     response = None
     try:
-        print(f"[INFO] 正在下载图片: {url}")
+        print(f"\n[DEBUG] 开始下载图片")
+        print(f"[DEBUG] 图片URL: {url[:100]}...")
+        print(f"[DEBUG] 下载超时: {timeout}秒")
+        
+        download_start_time = time.time()
         session = get_session()
         response = session.get(url, timeout=timeout, verify=False, stream=True)
         response.raise_for_status()
         
+        download_duration = time.time() - download_start_time
+        print(f"[DEBUG] 下载完成! 耗时: {download_duration:.2f} 秒")
+        print(f"[DEBUG] 图片大小: {len(response.content)} 字节")
+        
         pil_image = Image.open(io.BytesIO(response.content)).convert('RGB')
-        print(f"[INFO] 图片尺寸: {pil_image.size}")
+        print(f"[DEBUG] 图片尺寸: {pil_image.size}")
         
         numpy_image = np.array(pil_image).astype(np.float32) / 255.0
         tensor = torch.from_numpy(numpy_image)
         
+        print(f"[SUCCESS] ✅ 图片转换成功! Tensor shape: {tensor.shape}")
         return tensor
         
     except Exception as e:
-        print(f"[ERROR] 下载图片失败: {e}")
+        print(f"[ERROR] ❌ 下载图片失败: {type(e).__name__}")
+        print(f"[ERROR] 错误详情: {e}")
         return None
         
     finally:
@@ -126,24 +144,56 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
     """发送 API 请求"""
     import time
     
-    print(f"[INFO] 发送请求到: {url}")
-    print(f"[INFO] 请求参数: {json.dumps(payload, ensure_ascii=False)[:300]}...")
+    print(f"\n{'='*60}")
+    print(f"[DEBUG] 开始 API 请求")
+    print(f"[DEBUG] 目标URL: {url}")
+    print(f"[DEBUG] 超时设置: {timeout}秒")
+    print(f"[DEBUG] 最大重试: {max_retries}次")
+    print(f"[DEBUG] 请求头: {json.dumps({k: v[:20]+'...' if len(v)>20 else v for k, v in headers.items()}, ensure_ascii=False)}")
+    print(f"[DEBUG] 请求体大小: {len(json.dumps(payload))} 字节")
+    print(f"[DEBUG] 请求参数预览: {json.dumps(payload, ensure_ascii=False)[:300]}...")
+    print(f"{'='*60}\n")
     
     last_error = None
     response = None
     
     for attempt in range(1, max_retries + 1):
         try:
+            print(f"[DEBUG] >>> 第 {attempt}/{max_retries} 次请求开始 <<<")
+            request_start_time = time.time()
+            
+            # 检查中断信号(在重试前)
+            if COMFY_INTERRUPT_AVAILABLE and model_management.processing_interrupted():
+                error_msg = "用户在 ComfyUI 中中断了请求"
+                print(f"\n{'='*60}")
+                print(f"❌ {error_msg}")
+                print(f"{'='*60}\n")
+                raise RuntimeError(error_msg)
+            
             if response is not None:
                 response.close()
                 response = None
             
             if attempt > 1:
                 wait_time = min(backoff ** (attempt - 1), 20)
-                print(f"[INFO] 第 {attempt} 次重试，等待 {wait_time} 秒...")
-                time.sleep(wait_time)
+                print(f"[DEBUG] 重试等待: {wait_time} 秒...")
+                # 分段等待,每0.5秒检查一次中断
+                for i in range(int(wait_time * 2)):
+                    if COMFY_INTERRUPT_AVAILABLE and model_management.processing_interrupted():
+                        error_msg = "用户在 ComfyUI 中中断了请求"
+                        print(f"\n{'='*60}")
+                        print(f"❌ {error_msg}")
+                        print(f"{'='*60}\n")
+                        raise RuntimeError(error_msg)
+                    time.sleep(0.5)
+                print(f"[DEBUG] 等待完成,继续重试")
             
+            print(f"[DEBUG] 正在建立连接...")
             session = get_session()
+            
+            print(f"[DEBUG] 正在发送 POST 请求...")
+            print(f"[DEBUG] 等待服务器响应 (最长 {timeout} 秒)...")
+            
             response = session.post(
                 url,
                 headers=headers,
@@ -152,23 +202,49 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
                 verify=False
             )
             
-            print(f"[INFO] HTTP 状态码: {response.status_code}")
+            request_duration = time.time() - request_start_time
+            print(f"[DEBUG] 收到响应! 耗时: {request_duration:.2f} 秒")
+            print(f"[DEBUG] HTTP 状态码: {response.status_code}")
+            print(f"[DEBUG] 响应头: {dict(response.headers)}")
+            print(f"[DEBUG] 响应大小: {len(response.content)} 字节")
+            
             response.raise_for_status()
             
+            print(f"[DEBUG] 正在解析 JSON 响应...")
             result = response.json()
-            print(f"[SUCCESS] 请求成功！")
+            print(f"[DEBUG] JSON 解析成功!")
+            print(f"[DEBUG] 响应结构: {list(result.keys())}")
+            print(f"[SUCCESS] ✅ 请求成功! 总耗时: {request_duration:.2f} 秒")
             
             response.close()
             return result
             
         except Exception as exc:
             last_error = exc
-            print(f"[ERROR] 请求失败 (尝试 {attempt}/{max_retries}): {exc}")
+            request_duration = time.time() - request_start_time if 'request_start_time' in locals() else 0
+            
+            print(f"\n[ERROR] ❌ 请求失败 (尝试 {attempt}/{max_retries})")
+            print(f"[ERROR] 错误类型: {type(exc).__name__}")
+            print(f"[ERROR] 错误详情: {exc}")
+            print(f"[ERROR] 失败耗时: {request_duration:.2f} 秒")
+            
             if hasattr(exc, "response") and exc.response is not None:
                 try:
-                    print(f"[ERROR] 响应详情: {exc.response.json()}")
+                    error_body = exc.response.json()
+                    print(f"[ERROR] 服务器返回: {json.dumps(error_body, ensure_ascii=False)}")
                 except:
-                    print(f"[ERROR] 响应文本: {exc.response.text[:500]}")
+                    error_text = exc.response.text[:500]
+                    print(f"[ERROR] 服务器响应文本: {error_text}")
+            
+            # 判断是否是超时错误
+            if "timed out" in str(exc).lower() or "timeout" in str(exc).lower():
+                print(f"[ERROR] 🕐 检测到超时错误!")
+                print(f"[ERROR] 当前超时设置: {timeout} 秒")
+                print(f"[ERROR] 实际等待时间: {request_duration:.2f} 秒")
+                print(f"[TIPS] 💡 建议:")
+                print(f"[TIPS]    1. 增加'超时秒数'参数 (当前 {timeout}秒 → 建议 10-30秒)")
+                print(f"[TIPS]    2. 检查网络连接是否稳定")
+                print(f"[TIPS]    3. 确认 API 服务器是否响应正常")
             
             if hasattr(exc, "response") and exc.response is not None:
                 status_code = exc.response.status_code
@@ -185,7 +261,9 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
             except Exception as e:
                 pass
     
-    print(f"\n[ERROR] ❌ 请求最终失败，已重试 {max_retries} 次")
+    print(f"\n{'='*60}")
+    print(f"[ERROR] ❌ 请求最终失败，已重试 {max_retries} 次")
+    print(f"{'='*60}\n")
     if last_error:
         raise last_error
     raise RuntimeError("未知请求失败")
@@ -193,10 +271,10 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
 
 def poll_task_status(task_id: str, api_key: str, query_base_url: str, max_retries: int = 60, delay: int = 5):
     """轮询任务状态"""
-    # 如果用户没有输入路径，我们默认补充，如果是类似于直接提供的 endpoint prefix，也可以兼容
+    # 如果用户没有输入路径,我们默认补充,如果是类似于直接提供的 endpoint prefix,也可以兼容
     base = query_base_url.rstrip('/')
     if not base.endswith('/v1/tasks') and 'task_0' not in base:
-        # 如果是老版本的 base_url 逻辑，则拼接。目前用户提供的例子是 https://task.artsmcp.com/task_XXX
+        # 如果是老版本的 base_url 逻辑,则拼接。目前用户提供的例子是 https://task.artsmcp.com/task_XXX
         status_url = f"{base}/{task_id}?language=zh"
     else:
         # 兜底处理
@@ -213,38 +291,78 @@ def poll_task_status(task_id: str, api_key: str, query_base_url: str, max_retrie
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     
-    print(f"[INFO] 开始轮询任务状态: {task_id}")
+    print(f"\n{'='*60}")
+    print(f"[DEBUG] 开始轮询任务状态")
+    print(f"[DEBUG] 任务ID: {task_id}")
+    print(f"[DEBUG] 查询URL: {status_url}")
+    print(f"[DEBUG] 最大轮询次数: {max_retries}")
+    print(f"[DEBUG] 轮询间隔: {delay}秒")
+    print(f"{'='*60}\n")
     
     for attempt in range(max_retries):
+        # 检查 ComfyUI 中断信号
+        if COMFY_INTERRUPT_AVAILABLE and model_management.processing_interrupted():
+            error_msg = "用户在 ComfyUI 中中断了任务"
+            print(f"\n{'='*60}")
+            print(f"❌ {error_msg}")
+            print(f"任务ID: {task_id}")
+            print(f"{'='*60}\n")
+            raise RuntimeError(error_msg)
+        
         try:
+            print(f"[DEBUG] 第 {attempt + 1}/{max_retries} 次查询...")
+            query_start_time = time.time()
+            
             session = get_session()
             response = session.get(status_url, headers=headers, verify=False, timeout=30)
             response.raise_for_status()
             result = response.json()
             
+            query_duration = time.time() - query_start_time
+            print(f"[DEBUG] 查询响应耗时: {query_duration:.2f} 秒")
+            
             if "code" in result and result["code"] == 200:
                 data = result.get("data", {})
                 status = data.get("status", "")
                 
-                print(f"[INFO] 任务状态 ({attempt + 1}/{max_retries}): {status}")
+                print(f"[INFO] 任务状态: {status} ({attempt + 1}/{max_retries})")
                 
                 if status == "completed":
-                    print("[SUCCESS] 任务完成!")
+                    print(f"[SUCCESS] ✅ 任务完成!")
+                    print(f"[DEBUG] 完整响应: {json.dumps(result, ensure_ascii=False)[:500]}...")
                     return data
                 elif status == "failed":
                     error_msg = data.get("error", {}).get("message", "未知错误")
-                    print(f"[ERROR] 任务失败! 详情: {error_msg}")
+                    print(f"[ERROR] ❌ 任务失败!")
+                    print(f"[ERROR] 失败原因: {error_msg}")
+                    print(f"[DEBUG] 完整响应: {json.dumps(result, ensure_ascii=False)[:500]}...")
                     return None
+                else:
+                    print(f"[DEBUG] 任务进行中,{delay}秒后重试...")
             else:
-                print(f"[WARN] 异常响应: {result}")
+                print(f"[WARN] 异常响应码: {result.get('code', 'unknown')}")
+                print(f"[DEBUG] 响应内容: {json.dumps(result, ensure_ascii=False)[:300]}...")
                 
         except Exception as e:
-            print(f"[错误] 查询状态失败 ({attempt + 1}/{max_retries}): {e}")
+            print(f"[ERROR] 查询状态失败 ({attempt + 1}/{max_retries}): {e}")
         
         if attempt < max_retries - 1:
-            time.sleep(delay)
+            # 分段等待，每0.5秒检查一次中断信号
+            for _ in range(int(delay * 2)):
+                if COMFY_INTERRUPT_AVAILABLE and model_management.processing_interrupted():
+                    error_msg = "用户在 ComfyUI 中中断了任务"
+                    print(f"\n{'='*60}")
+                    print(f"❌ {error_msg}")
+                    print(f"任务ID: {task_id}")
+                    print(f"{'='*60}\n")
+                    raise RuntimeError(error_msg)
+                time.sleep(0.5)
     
-    print("[WARN] 达到最大重试次数")
+    print(f"\n{'='*60}")
+    print(f"[WARN] ⚠️ 达到最大轮询次数 ({max_retries})")
+    print(f"[WARN] 任务ID: {task_id}")
+    print(f"[TIPS] 💡 建议增加'最大轮询次数'参数")
+    print(f"{'='*60}\n")
     return None
 
 
@@ -286,7 +404,7 @@ class Gemini31ImageNode:
                 }),
                 "超时秒数": ("INT", {
                     "default": 120,
-                    "min": 30,
+                    "min": 10,
                     "max": 600,
                     "step": 10
                 }),
@@ -401,17 +519,14 @@ class Gemini31ImageNode:
         if valid_refs:
             image_b64_list = [tensor_to_base64(img) for img in valid_refs]
             print(f"[INFO] 接收到 {len(valid_refs)} 张有效参考图，已全部转换为 Base64 格式。")
-            if len(image_b64_list) == 1:
-                payload["image_urls"] = image_b64_list[0]
-            else:
-                payload["image_urls"] = image_b64_list
+            payload["image_urls"] = image_b64_list
         else:
             print("[INFO] 本次生成没有传入参考图 (文生图模式)。")
             
         try:
             # 1. 提交任务
             create_result = make_api_request(create_url, headers, payload, timeout=超时秒数, max_retries=最大重试次数)
-            
+                    
             task_ids = []
             if "data" in create_result and isinstance(create_result["data"], list):
                 for item in create_result["data"]:
@@ -419,20 +534,27 @@ class Gemini31ImageNode:
                         task_ids.append(item["task_id"])
             elif "data" in create_result and isinstance(create_result["data"], dict) and "task_id" in create_result["data"]:
                 task_ids.append(create_result["data"]["task_id"])
-                
+                        
             if not task_ids:
                 raise RuntimeError(f"未从响应中找到任务ID: {create_result}")
-                
-            # 我们只处理第一个任务，因为如果有多个任务也只是同一个请求触发
+                        
+            # 我们只处理第一个任务,因为如果有多个任务也只是同一个请求触发
             task_id = task_ids[0]
-            print(f"[INFO] 成功提交任务，Task ID: {task_id}")
-            
+            print(f"[INFO] 成功提交任务,Task ID: {task_id}")
+                    
             # 2. 轮询任务
-            task_data = poll_task_status(task_id, API密钥, 查询API地址, 最大轮询次数, 轮询间隔秒数)
-            
+            try:
+                task_data = poll_task_status(task_id, API密钥, 查询API地址, 最大轮询次数, 轮询间隔秒数)
+            except KeyboardInterrupt:
+                error_msg = f"用户通过 Ctrl+C 中断了任务\n任务ID: {task_id}"
+                print(f"\n{'='*60}")
+                print(f"❌ {error_msg}")
+                print(f"{'='*60}\n")
+                raise RuntimeError(error_msg)
+                    
             if not task_data:
                 raise RuntimeError("任务轮询失败或超时")
-                
+                        
             # 3. 解析结果图片URL
             image_urls = []
             if "result" in task_data and "images" in task_data["result"]:
@@ -442,15 +564,23 @@ class Gemini31ImageNode:
                             image_urls.extend(img_data["url"])
                         else:
                             image_urls.append(img_data["url"])
-            
+                    
             if not image_urls:
-                raise RuntimeError(f"任务已完成，但未找到图片URL: {task_data}")
-                
+                raise RuntimeError(f"任务已完成,但未找到图片URL: {task_data}")
+                        
             print(f"[INFO] 获取到 {len(image_urls)} 个图片URL")
-            
+                    
             # 4. 下载图片
             output_tensors = []
             for url in image_urls:
+                # 检查中断
+                if COMFY_INTERRUPT_AVAILABLE and model_management.processing_interrupted():
+                    error_msg = "用户在 ComfyUI 中中断了图片下载"
+                    print(f"\n{'='*60}")
+                    print(f"❌ {error_msg}")
+                    print(f"{'='*60}\n")
+                    raise RuntimeError(error_msg)
+                        
                 tensor = download_image_to_tensor(url, 超时秒数)
                 if tensor is not None:
                     output_tensors.append(tensor)
