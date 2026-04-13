@@ -70,7 +70,7 @@ RESOLUTION_MAP = {
 
 
 def tensor_to_base64(image_tensor):
-    """将 ComfyUI tensor 转换为 base64 字符串"""
+    """将 ComfyUI tensor 转换为原始 base64 字符串（不含 data URI 前缀）"""
     if len(image_tensor.shape) > 3:
         image_tensor = image_tensor[0]
     
@@ -82,7 +82,7 @@ def tensor_to_base64(image_tensor):
     img_bytes = buffered.getvalue()
     base64_string = base64.b64encode(img_bytes).decode('utf-8')
     
-    return f"data:image/jpeg;base64,{base64_string}"
+    return base64_string
 
 
 def get_session():
@@ -141,8 +141,9 @@ def download_image_to_tensor(url: str, timeout: int = 60):
 
 
 def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120, max_retries: int = 3, backoff: int = 2):
-    """发送 API 请求"""
+    """发送 API 请求（后台线程执行，主线程可随时响应中断）"""
     import time
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
     
     print(f"\n{'='*60}")
     print(f"[DEBUG] 开始 API 请求")
@@ -154,6 +155,19 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
     print(f"[DEBUG] 请求参数预览: {json.dumps(payload, ensure_ascii=False)[:300]}...")
     print(f"{'='*60}\n")
     
+    def _check_interrupted():
+        """检查 ComfyUI 中断信号"""
+        if COMFY_INTERRUPT_AVAILABLE and model_management.processing_interrupted():
+            error_msg = "用户在 ComfyUI 中中断了请求"
+            print(f"\n{'='*60}")
+            print(f"❌ {error_msg}")
+            print(f"{'='*60}\n")
+            raise RuntimeError(error_msg)
+    
+    def _do_post(session, url, headers, payload, timeout):
+        """在后台线程中执行实际的 HTTP POST 请求"""
+        return session.post(url, headers=headers, json=payload, timeout=timeout, verify=False)
+    
     last_error = None
     response = None
     
@@ -163,12 +177,7 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
             request_start_time = time.time()
             
             # 检查中断信号(在重试前)
-            if COMFY_INTERRUPT_AVAILABLE and model_management.processing_interrupted():
-                error_msg = "用户在 ComfyUI 中中断了请求"
-                print(f"\n{'='*60}")
-                print(f"❌ {error_msg}")
-                print(f"{'='*60}\n")
-                raise RuntimeError(error_msg)
+            _check_interrupted()
             
             if response is not None:
                 response.close()
@@ -179,12 +188,7 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
                 print(f"[DEBUG] 重试等待: {wait_time} 秒...")
                 # 分段等待,每0.5秒检查一次中断
                 for i in range(int(wait_time * 2)):
-                    if COMFY_INTERRUPT_AVAILABLE and model_management.processing_interrupted():
-                        error_msg = "用户在 ComfyUI 中中断了请求"
-                        print(f"\n{'='*60}")
-                        print(f"❌ {error_msg}")
-                        print(f"{'='*60}\n")
-                        raise RuntimeError(error_msg)
+                    _check_interrupted()
                     time.sleep(0.5)
                 print(f"[DEBUG] 等待完成,继续重试")
             
@@ -192,15 +196,25 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
             session = get_session()
             
             print(f"[DEBUG] 正在发送 POST 请求...")
-            print(f"[DEBUG] 等待服务器响应 (最长 {timeout} 秒)...")
+            print(f"[DEBUG] 等待服务器响应 (最长 {timeout} 秒, 可随时中断)...")
             
-            response = session.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=timeout,
-                verify=False
-            )
+            # 将 HTTP 请求放入后台线程，主线程轮询中断信号
+            with ThreadPoolExecutor(max_workers=1) as req_executor:
+                future = req_executor.submit(_do_post, session, url, headers, payload, timeout)
+                
+                while True:
+                    # 每 0.5 秒检查一次中断信号
+                    _check_interrupted()
+                    try:
+                        response = future.result(timeout=0.5)
+                        break  # 请求完成
+                    except FutureTimeoutError:
+                        # future 尚未完成，继续等待并检查中断
+                        elapsed = time.time() - request_start_time
+                        # 每 10 秒打印一次等待状态
+                        if int(elapsed) % 10 == 0 and int(elapsed) > 0:
+                            print(f"[DEBUG] 已等待 {elapsed:.0f} 秒...")
+                        continue
             
             request_duration = time.time() - request_start_time
             print(f"[DEBUG] 收到响应! 耗时: {request_duration:.2f} 秒")
@@ -223,6 +237,10 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
             last_error = exc
             request_duration = time.time() - request_start_time if 'request_start_time' in locals() else 0
             
+            # 如果是用户主动中断，直接抛出不重试
+            if "中断" in str(exc):
+                raise
+            
             print(f"\n[ERROR] ❌ 请求失败 (尝试 {attempt}/{max_retries})")
             print(f"[ERROR] 错误类型: {type(exc).__name__}")
             print(f"[ERROR] 错误详情: {exc}")
@@ -241,10 +259,7 @@ def make_api_request(url: str, headers: dict, payload: dict, timeout: int = 120,
                 print(f"[ERROR] 🕐 检测到超时错误!")
                 print(f"[ERROR] 当前超时设置: {timeout} 秒")
                 print(f"[ERROR] 实际等待时间: {request_duration:.2f} 秒")
-                print(f"[TIPS] 💡 建议:")
-                print(f"[TIPS]    1. 增加'超时秒数'参数 (当前 {timeout}秒 → 建议 10-30秒)")
-                print(f"[TIPS]    2. 检查网络连接是否稳定")
-                print(f"[TIPS]    3. 确认 API 服务器是否响应正常")
+                print(f"[TIPS] 💡 建议: 增加'超时秒数'参数")
             
             if hasattr(exc, "response") and exc.response is not None:
                 status_code = exc.response.status_code
@@ -367,7 +382,7 @@ def poll_task_status(task_id: str, api_key: str, query_base_url: str, max_retrie
 
 
 class Gemini31ImageNode:
-    """Gemini 3.1 图片生成节点 - 支持异步轮询创建"""
+    """Gemini 3.1 图片生成节点 - 同步调用 Gemini generateContent API"""
     
     def __init__(self):
         self.verbose = False
@@ -385,13 +400,9 @@ class Gemini31ImageNode:
                     "multiline": False,
                     "default": CONFIG.get(CONFIG_SECTION, "api_key", fallback="")
                 }),
-                "生成API地址": ("STRING", {
+                "API地址": ("STRING", {
                     "multiline": False,
-                    "default": CONFIG.get(CONFIG_SECTION, "api_url", fallback="https://apitt.cozex.cn")
-                }),
-                "查询API地址": ("STRING", {
-                    "multiline": False,
-                    "default": CONFIG.get(CONFIG_SECTION, "query_url", fallback="https://task.artsmcp.com")
+                    "default": CONFIG.get(CONFIG_SECTION, "api_url", fallback="https://api.artsmcp.com")
                 }),
                 "模型": (list(MODEL_MAP.keys()), {
                     "default": list(MODEL_MAP.keys())[0]
@@ -403,7 +414,7 @@ class Gemini31ImageNode:
                     "default": "4K"
                 }),
                 "超时秒数": ("INT", {
-                    "default": 120,
+                    "default": 300,
                     "min": 10,
                     "max": 600,
                     "step": 10
@@ -413,18 +424,6 @@ class Gemini31ImageNode:
                     "min": 1,
                     "max": 10,
                     "step": 1
-                }),
-                "轮询间隔秒数": ("INT", {
-                    "default": 5,
-                    "min": 1,
-                    "max": 30,
-                    "step": 1
-                }),
-                "最大轮询次数": ("INT", {
-                    "default": 120,
-                    "min": 10,
-                    "max": 600,
-                    "step": 10
                 }),
                 "并发请求数": ("INT", {
                     "default": 1,
@@ -463,8 +462,8 @@ class Gemini31ImageNode:
         import time
         return time.time()
     
-    def generate_image(self, 提示词, API密钥, 生成API地址, 查询API地址, 模型, 宽高比,
-                       分辨率, 超时秒数, 最大重试次数, 轮询间隔秒数, 最大轮询次数, 并发请求数,
+    def generate_image(self, 提示词, API密钥, API地址, 模型, 宽高比,
+                       分辨率, 超时秒数, 最大重试次数, 并发请求数,
                        参考图片1=None, 参考图片2=None, 参考图片3=None, 参考图片4=None,
                        参考图片5=None, 参考图片6=None, 参考图片7=None, 参考图片8=None,
                        参考图片9=None, 参考图片10=None, 参考图片11=None, 参考图片12=None,
@@ -479,34 +478,26 @@ class Gemini31ImageNode:
         
         if API密钥.strip():
             config_writer.set(CONFIG_SECTION, "api_key", API密钥.strip())
-        if 生成API地址.strip():
-            config_writer.set(CONFIG_SECTION, "api_url", 生成API地址.strip())
-        if 查询API地址.strip():
-            config_writer.set(CONFIG_SECTION, "query_url", 查询API地址.strip())
+        if API地址.strip():
+            config_writer.set(CONFIG_SECTION, "api_url", API地址.strip())
             
         with CONFIG_PATH.open("w", encoding="utf-8") as fp:
             config_writer.write(fp)
             
-        # 准备创建任务URL
-        create_url = 生成API地址
-        if '/v1/images/generations' not in create_url:
-            create_url = create_url.rstrip('/') + '/v1/images/generations'
+        # 构建 Gemini generateContent API URL
+        # 格式: {base_url}/v1beta/models/{model}:generateContent?key={api_key}
+        base_url = API地址.rstrip('/')
+        model_name = MODEL_MAP[模型]
+        api_url = f"{base_url}/v1beta/models/{model_name}:generateContent?key={API密钥}"
             
         headers = {
-            "Authorization": f"Bearer {API密钥}",
             "Content-Type": "application/json",
-            "User-Agent": "Apifox/1.0.0 (https://apifox.com)"
         }
         
-        payload = {
-            "model": MODEL_MAP[模型],
-            "prompt": 提示词,
-            "size": IMAGE_SIZE_MAP[宽高比],
-            "resolution": RESOLUTION_MAP[分辨率],
-            "n": 并发请求数
-        }
+        # 构建 Gemini 请求体中的 parts
+        parts = []
         
-        # 处理参考图片 (支持多图)
+        # 处理参考图片 (支持多图) - 作为 inlineData parts
         ref_images = [
             参考图片1, 参考图片2, 参考图片3, 参考图片4,
             参考图片5, 参考图片6, 参考图片7, 参考图片8,
@@ -517,79 +508,111 @@ class Gemini31ImageNode:
         valid_refs = [img for img in ref_images if img is not None]
         
         if valid_refs:
-            image_b64_list = [tensor_to_base64(img) for img in valid_refs]
-            print(f"[INFO] 接收到 {len(valid_refs)} 张有效参考图，已全部转换为 Base64 格式。")
-            payload["image_urls"] = image_b64_list
+            for img in valid_refs:
+                b64_data = tensor_to_base64(img)
+                parts.append({
+                    "inlineData": {
+                        "mimeType": "image/jpeg",
+                        "data": b64_data
+                    }
+                })
+            print(f"[INFO] 接收到 {len(valid_refs)} 张有效参考图，已全部转换为 inlineData 格式。")
         else:
             print("[INFO] 本次生成没有传入参考图 (文生图模式)。")
+        
+        # 添加文本提示词
+        parts.append({"text": 提示词})
+        
+        # 构建完整请求体 (Gemini generateContent 格式)
+        payload = {
+            "contents": [
+                {
+                    "parts": parts
+                }
+            ],
+            "generationConfig": {
+                "imageConfig": {
+                    "aspectRatio": IMAGE_SIZE_MAP[宽高比],
+                    "imageSize": RESOLUTION_MAP[分辨率]
+                }
+            }
+        }
             
         try:
-            # 1. 提交任务
-            create_result = make_api_request(create_url, headers, payload, timeout=超时秒数, max_retries=最大重试次数)
-                    
-            task_ids = []
-            if "data" in create_result and isinstance(create_result["data"], list):
-                for item in create_result["data"]:
-                    if "task_id" in item:
-                        task_ids.append(item["task_id"])
-            elif "data" in create_result and isinstance(create_result["data"], dict) and "task_id" in create_result["data"]:
-                task_ids.append(create_result["data"]["task_id"])
+            def _single_request():
+                """执行单次 Gemini generateContent 请求并返回图片 tensor 列表"""
+                result = make_api_request(api_url, headers, payload, timeout=超时秒数, max_retries=最大重试次数)
+                
+                # 解析 Gemini 响应，提取 inlineData 中的 base64 图片
+                tensors = []
+                candidates = result.get("candidates", [])
+                if not candidates:
+                    raise RuntimeError(f"API 响应中没有 candidates: {json.dumps(result, ensure_ascii=False)[:500]}")
+                
+                for candidate in candidates:
+                    content = candidate.get("content", {})
+                    resp_parts = content.get("parts", [])
+                    for part in resp_parts:
+                        # 跳过 thought 文本
+                        if part.get("thought"):
+                            thought_text = part.get("text", "")
+                            if thought_text:
+                                print(f"[INFO] 模型思考: {thought_text[:200]}...")
+                            continue
                         
-            if not task_ids:
-                raise RuntimeError(f"未从响应中找到任务ID: {create_result}")
+                        # 提取 inlineData 中的图片
+                        inline_data = part.get("inlineData")
+                        if inline_data and "data" in inline_data:
+                            mime_type = inline_data.get("mimeType", "image/png")
+                            b64_data = inline_data["data"]
+                            print(f"[DEBUG] 收到内嵌图片, mimeType: {mime_type}, base64长度: {len(b64_data)}")
+                            
+                            # 解码 base64 -> PIL Image -> tensor
+                            img_bytes = base64.b64decode(b64_data)
+                            pil_image = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+                            print(f"[DEBUG] 图片尺寸: {pil_image.size}")
+                            
+                            numpy_image = np.array(pil_image).astype(np.float32) / 255.0
+                            tensor = torch.from_numpy(numpy_image)
+                            tensors.append(tensor)
+                            print(f"[SUCCESS] 图片转换成功! Tensor shape: {tensor.shape}")
                         
-            # 我们只处理第一个任务,因为如果有多个任务也只是同一个请求触发
-            task_id = task_ids[0]
-            print(f"[INFO] 成功提交任务,Task ID: {task_id}")
-                    
-            # 2. 轮询任务
-            try:
-                task_data = poll_task_status(task_id, API密钥, 查询API地址, 最大轮询次数, 轮询间隔秒数)
-            except KeyboardInterrupt:
-                error_msg = f"用户通过 Ctrl+C 中断了任务\n任务ID: {task_id}"
-                print(f"\n{'='*60}")
-                print(f"❌ {error_msg}")
-                print(f"{'='*60}\n")
-                raise RuntimeError(error_msg)
-                    
-            if not task_data:
-                raise RuntimeError("任务轮询失败或超时")
-                        
-            # 3. 解析结果图片URL
-            image_urls = []
-            if "result" in task_data and "images" in task_data["result"]:
-                for img_data in task_data["result"]["images"]:
-                    if "url" in img_data:
-                        if isinstance(img_data["url"], list):
-                            image_urls.extend(img_data["url"])
-                        else:
-                            image_urls.append(img_data["url"])
-                    
-            if not image_urls:
-                raise RuntimeError(f"任务已完成,但未找到图片URL: {task_data}")
-                        
-            print(f"[INFO] 获取到 {len(image_urls)} 个图片URL")
-                    
-            # 4. 下载图片
+                        # 非 thought 的普通文本
+                        elif "text" in part:
+                            text_content = part.get("text", "")
+                            if text_content:
+                                print(f"[INFO] 模型文本输出: {text_content[:300]}...")
+                
+                # 打印 usage 信息
+                usage = result.get("usageMetadata", {})
+                if usage:
+                    print(f"[INFO] Token 使用: prompt={usage.get('promptTokenCount', '?')}, "
+                          f"candidates={usage.get('candidatesTokenCount', '?')}, "
+                          f"total={usage.get('totalTokenCount', '?')}, "
+                          f"thoughts={usage.get('thoughtsTokenCount', '?')}")
+                
+                return tensors
+            
+            # 执行请求 (支持并发)
             output_tensors = []
-            for url in image_urls:
-                # 检查中断
-                if COMFY_INTERRUPT_AVAILABLE and model_management.processing_interrupted():
-                    error_msg = "用户在 ComfyUI 中中断了图片下载"
-                    print(f"\n{'='*60}")
-                    print(f"❌ {error_msg}")
-                    print(f"{'='*60}\n")
-                    raise RuntimeError(error_msg)
-                        
-                tensor = download_image_to_tensor(url, 超时秒数)
-                if tensor is not None:
-                    output_tensors.append(tensor)
+            
+            if 并发请求数 <= 1:
+                output_tensors = _single_request()
+            else:
+                print(f"[INFO] 启动 {并发请求数} 个并发请求...")
+                with ThreadPoolExecutor(max_workers=并发请求数) as executor:
+                    futures = [executor.submit(_single_request) for _ in range(并发请求数)]
+                    for future in as_completed(futures):
+                        try:
+                            tensors = future.result()
+                            output_tensors.extend(tensors)
+                        except Exception as e:
+                            print(f"[ERROR] 并发请求失败: {e}")
                     
             if not output_tensors:
-                raise RuntimeError("所有图片下载失败")
+                raise RuntimeError("未从 API 响应中获取到任何图片")
                 
-            # 5. 合并并返回
-            # 根据原始逻辑, 需要进行尺寸统一
+            # 合并并返回 - 尺寸统一
             tensor_shapes = [(t.shape[0], t.shape[1]) for t in output_tensors]
             if len(set(tensor_shapes)) > 1:
                 min_h = min([s[0] for s in tensor_shapes])
@@ -603,7 +626,7 @@ class Gemini31ImageNode:
                 output_tensors = normalized
                 
             batch_tensor = torch.stack(output_tensors, dim=0).contiguous()
-            print(f"[SUCCESS] ✅ 成功生成 {len(output_tensors)} 张图片!")
+            print(f"[SUCCESS] 成功生成 {len(output_tensors)} 张图片!")
             return (batch_tensor,)
             
         except Exception as e:
