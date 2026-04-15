@@ -431,6 +431,9 @@ class Gemini31ImageNode:
                     "max": 10,
                     "step": 1
                 }),
+                "启用分行提示词": ("BOOLEAN", {
+                    "default": False
+                }),
             },
             "optional": {
                 "参考图片1": ("IMAGE", {}),
@@ -463,7 +466,7 @@ class Gemini31ImageNode:
         return time.time()
     
     def generate_image(self, 提示词, API密钥, API地址, 模型, 宽高比,
-                       分辨率, 超时秒数, 最大重试次数, 并发请求数,
+                       分辨率, 超时秒数, 最大重试次数, 并发请求数, 启用分行提示词,
                        参考图片1=None, 参考图片2=None, 参考图片3=None, 参考图片4=None,
                        参考图片5=None, 参考图片6=None, 参考图片7=None, 参考图片8=None,
                        参考图片9=None, 参考图片10=None, 参考图片11=None, 参考图片12=None,
@@ -484,6 +487,26 @@ class Gemini31ImageNode:
         with CONFIG_PATH.open("w", encoding="utf-8") as fp:
             config_writer.write(fp)
             
+        # 准备提示词列表（分行提示词模式）
+        if 启用分行提示词:
+            prompts = [line.strip() for line in 提示词.split('\n') if line.strip()]
+            print("\n" + "="*60)
+            print("[Gemini-3.1] 启用分行提示词模式")
+            print(f"  - 拆分后提示词数量: {len(prompts)}")
+            print(f"  - 每行并发请求数: {并发请求数}")
+            print(f"  - 总任务数: {len(prompts)} 行 × {并发请求数} 并发 = {len(prompts) * 并发请求数} 张图")
+            for idx, p in enumerate(prompts, 1):
+                print(f"  - 提示词{idx}: {p[:50]}...")
+            print("="*60 + "\n")
+        else:
+            prompts = [提示词]
+            print("\n" + "="*60)
+            print("[Gemini-3.1] 完整提示词模式")
+            print(f"  - 提示词: {提示词[:50]}...")
+            print(f"  - 并发请求数: {并发请求数}")
+            print(f"  - 总任务数: {并发请求数} 张图")
+            print("="*60 + "\n")
+        
         # 构建 Gemini generateContent API URL
         # 格式: {base_url}/v1beta/models/{model}:generateContent?key={api_key}
         base_url = API地址.rstrip('/')
@@ -520,27 +543,30 @@ class Gemini31ImageNode:
         else:
             print("[INFO] 本次生成没有传入参考图 (文生图模式)。")
         
-        # 添加文本提示词
-        parts.append({"text": 提示词})
+        # 保存参考图片 parts，供后续每个提示词请求复用
+        ref_image_parts = list(parts)
         
-        # 构建完整请求体 (Gemini generateContent 格式)
-        payload = {
-            "contents": [
-                {
-                    "parts": parts
-                }
-            ],
-            "generationConfig": {
-                "imageConfig": {
-                    "aspectRatio": IMAGE_SIZE_MAP[宽高比],
-                    "imageSize": RESOLUTION_MAP[分辨率]
-                }
-            }
-        }
-            
         try:
-            def _single_request():
+            def _single_request(current_prompt):
                 """执行单次 Gemini generateContent 请求并返回图片 tensor 列表"""
+                # 为每次请求构建独立的 parts（基于共享的参考图片 parts）
+                request_parts = list(ref_image_parts)
+                request_parts.append({"text": current_prompt})
+                
+                payload = {
+                    "contents": [
+                        {
+                            "parts": request_parts
+                        }
+                    ],
+                    "generationConfig": {
+                        "imageConfig": {
+                            "aspectRatio": IMAGE_SIZE_MAP[宽高比],
+                            "imageSize": RESOLUTION_MAP[分辨率]
+                        }
+                    }
+                }
+                
                 result = make_api_request(api_url, headers, payload, timeout=超时秒数, max_retries=最大重试次数)
                 
                 # 解析 Gemini 响应，提取 inlineData 中的 base64 图片
@@ -593,21 +619,39 @@ class Gemini31ImageNode:
                 
                 return tensors
             
-            # 执行请求 (支持并发)
+            # 执行请求 (所有提示词 × 并发数 全部并发发送)
             output_tensors = []
             
-            if 并发请求数 <= 1:
-                output_tensors = _single_request()
+            # 构建所有任务: 每个提示词 × 并发请求数
+            all_tasks = []
+            for prompt_idx, current_prompt in enumerate(prompts, 1):
+                for req_idx in range(并发请求数):
+                    all_tasks.append((prompt_idx, req_idx + 1, current_prompt))
+            
+            total_tasks = len(all_tasks)
+            print(f"[INFO] 共 {total_tasks} 个请求任务，全部并发发送...")
+            
+            if total_tasks == 1:
+                # 只有一个任务，直接执行
+                tensors = _single_request(all_tasks[0][2])
+                output_tensors.extend(tensors)
             else:
-                print(f"[INFO] 启动 {并发请求数} 个并发请求...")
-                with ThreadPoolExecutor(max_workers=并发请求数) as executor:
-                    futures = [executor.submit(_single_request) for _ in range(并发请求数)]
-                    for future in as_completed(futures):
+                # 多个任务，全部并发
+                max_workers = min(total_tasks, 10)
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_info = {}
+                    for prompt_idx, req_idx, current_prompt in all_tasks:
+                        future = executor.submit(_single_request, current_prompt)
+                        future_to_info[future] = (prompt_idx, req_idx, current_prompt)
+                    
+                    for future in as_completed(future_to_info):
+                        p_idx, r_idx, p_text = future_to_info[future]
                         try:
                             tensors = future.result()
                             output_tensors.extend(tensors)
+                            print(f"[SUCCESS] ✅ 提示词{p_idx}-请求{r_idx} 完成")
                         except Exception as e:
-                            print(f"[ERROR] 并发请求失败: {e}")
+                            print(f"[ERROR] ❌ 提示词{p_idx}-请求{r_idx} 失败: {e}")
                     
             if not output_tensors:
                 raise RuntimeError("未从 API 响应中获取到任何图片")
